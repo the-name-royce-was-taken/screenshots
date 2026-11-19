@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useStore, SAMPLE_SHAPE_INFO } from '../../store/useStore';
 import type { SampleShape } from '../../types/project';
 import { useModelImport } from '../../hooks/useModelImport';
@@ -158,6 +159,12 @@ export function ModelStep({ inputs }: { inputs: WorkflowInputs }) {
 }
 
 function DimensionField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
   return (
     <label className="dimension-field">
       <span>{label} (mm)</span>
@@ -166,10 +173,19 @@ function DimensionField({ label, value, onChange }: { label: string; value: numb
         min="0.1"
         max="1000"
         step="0.1"
-        value={value}
+        value={draft}
         onChange={(event) => {
-          const next = Number(event.target.value);
+          const raw = event.target.value;
+          setDraft(raw);
+          if (raw.trim() === '') return;
+          const next = Number(raw);
           if (Number.isFinite(next) && next >= 0.1 && next <= 1000) onChange(next);
+        }}
+        onBlur={() => {
+          const next = Number(draft);
+          if (draft.trim() === '' || !Number.isFinite(next) || next < 0.1 || next > 1000) {
+            setDraft(String(value));
+          }
         }}
       />
     </label>
