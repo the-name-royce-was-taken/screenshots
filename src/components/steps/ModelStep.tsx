@@ -103,8 +103,8 @@ export function ModelStep({ inputs }: { inputs: WorkflowInputs }) {
               <DimensionField label="Height" value={store.params.sampleCylinderHeight} onChange={(v) => store.updateParams({ sampleCylinderHeight: v })} />
             </>}
             {store.sampleShape === 'torus' && <>
-              <DimensionField label="Inner diameter" value={store.params.sampleTorusInnerDiameter} onChange={(v) => store.updateParams({ sampleTorusInnerDiameter: v })} />
-              <DimensionField label="Outer diameter" value={store.params.sampleTorusOuterDiameter} onChange={(v) => store.updateParams({ sampleTorusOuterDiameter: v })} />
+              <DimensionField label="Inner diameter" value={store.params.sampleTorusInnerDiameter} onChange={(v) => store.updateParams(v < store.params.sampleTorusOuterDiameter ? { sampleTorusInnerDiameter: v } : { sampleTorusInnerDiameter: v, sampleTorusOuterDiameter: v + 0.1 })} />
+              <DimensionField label="Outer diameter" value={store.params.sampleTorusOuterDiameter} onChange={(v) => store.updateParams(v > store.params.sampleTorusInnerDiameter ? { sampleTorusOuterDiameter: v } : { sampleTorusInnerDiameter: Math.max(0.1, v - 0.1), sampleTorusOuterDiameter: v })} />
             </>}
           </div>
           {store.sampleShape === 'torus' && store.params.sampleTorusOuterDiameter <= store.params.sampleTorusInnerDiameter && <p className="field-hint" role="alert">Outer diameter must be greater than inner diameter.</p>}
