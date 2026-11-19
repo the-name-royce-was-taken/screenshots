@@ -90,6 +90,14 @@ export interface LatticeParams {
    * Wall and strut thickness stay in millimetres; only the period stretches.
    */
   cellScale: [number, number, number];
+  /** Procedural sample dimensions, millimetres. */
+  sampleSphereDiameter: number;
+  sampleCubeWidth: number;
+  sampleCubeHeight: number;
+  sampleCylinderDiameter: number;
+  sampleCylinderHeight: number;
+  sampleTorusInnerDiameter: number;
+  sampleTorusOuterDiameter: number;
 }
 
 /**
@@ -202,6 +210,13 @@ export const DEFAULT_PARAMS: LatticeParams = {
   toleranceMm: 0.2,
   latticeRotationDeg: [0, 0, 0],
   cellScale: [1, 1, 1],
+  sampleSphereDiameter: 50,
+  sampleCubeWidth: 30,
+  sampleCubeHeight: 30,
+  sampleCylinderDiameter: 30,
+  sampleCylinderHeight: 40,
+  sampleTorusInnerDiameter: 24,
+  sampleTorusOuterDiameter: 56,
 };
 
 /** Bounds of each lattice rotation angle, degrees. */
@@ -288,6 +303,13 @@ const PARAM_VALIDATORS: Record<keyof LatticeParams, ParamValidator> = {
   toleranceMm: isFiniteNumberIn(0.001, 50),
   latticeRotationDeg: isVec3In(-LATTICE_ROTATION_LIMIT_DEG, LATTICE_ROTATION_LIMIT_DEG),
   cellScale: isVec3In(CELL_SCALE_MIN, CELL_SCALE_MAX),
+  sampleSphereDiameter: isFiniteNumberIn(0.1, 1000),
+  sampleCubeWidth: isFiniteNumberIn(0.1, 1000),
+  sampleCubeHeight: isFiniteNumberIn(0.1, 1000),
+  sampleCylinderDiameter: isFiniteNumberIn(0.1, 1000),
+  sampleCylinderHeight: isFiniteNumberIn(0.1, 1000),
+  sampleTorusInnerDiameter: isFiniteNumberIn(0.1, 1000),
+  sampleTorusOuterDiameter: isFiniteNumberIn(0.2, 2000),
 };
 
 export interface SanitizedParams {
