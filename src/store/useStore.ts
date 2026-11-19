@@ -1328,7 +1328,7 @@ export function hydrateFromSnapshot(snapshot: Partial<PersistedAppState>): Parti
 }
 
 let persistenceReady = false;
-let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 function schedulePersistence() {
   if (!persistenceReady || typeof window === 'undefined') return;
