@@ -52,6 +52,13 @@ const PARAM_LABELS: Record<keyof LatticeParams, string> = {
   toleranceMm: 'tolerance',
   latticeRotationDeg: 'lattice rotation',
   cellScale: 'cell stretch',
+  sampleSphereDiameter: 'sample sphere diameter',
+  sampleCubeWidth: 'sample cube width',
+  sampleCubeHeight: 'sample cube height',
+  sampleCylinderDiameter: 'sample cylinder diameter',
+  sampleCylinderHeight: 'sample cylinder height',
+  sampleTorusInnerDiameter: 'sample torus inner diameter',
+  sampleTorusOuterDiameter: 'sample torus outer diameter',
 };
 
 /** Parameters that change the reported statistics but not the geometry. */
