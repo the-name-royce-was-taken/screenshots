@@ -137,7 +137,7 @@ export function sampleShapeBounds(
     }
     case 'torus': {
       const xy = dims.torusOuterDiameter / 2 + pad;
-      const z = (dimensions.torusOuterDiameter - dims.torusInnerDiameter) / 4 + pad;
+      const z = (dims.torusOuterDiameter - dims.torusInnerDiameter) / 4 + pad;
       return { min: [-xy, -xy, -z], max: [xy, xy, z] };
     }
     case 'capsule': {
