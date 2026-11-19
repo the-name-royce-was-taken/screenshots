@@ -1543,7 +1543,7 @@ export function buildCapsuleLattice(
  */
 export function buildSampleShapeLattice(
   shape: SampleShape,
-  sphereRadius: number,
+  _sphereRadius: number,
   params: LatticeParams,
   generationSeed = DEFAULT_GENERATION_SEED,
 ): SdfFunction {
