@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -84,7 +84,7 @@ button:disabled{opacity:.5;cursor:wait}
 <option value="96">Ultra</option>
 <option value="120">Extreme</option>
 </select>
-<div class="hint">Higher resolution improves curved surfaces but increases computation time and file size.</div>
+<div class="hint">Resolution is automatically increased when needed to sample the gyroid cleanly. Higher settings increase computation time and file size.</div>
 <div class="check"><input type="checkbox" id="cleanup" checked><label for="cleanup">Remove tiny disconnected fragments</label></div>
 </section>
 
@@ -241,22 +241,21 @@ function getP(){
 function field(x,y,z,p){
   const k=2*Math.PI*p.periods/p.maxD;
   const X=x*k,Y=y*k,Z=z*k;
+  const sx=Math.sin(X),sy=Math.sin(Y),sz=Math.sin(Z);
+  const cx=Math.cos(X),cy=Math.cos(Y),cz=Math.cos(Z);
+  const g=sx*cy+sy*cz+sz*cx+p.phase;
 
-
-  const g=
-    Math.sin(X)*Math.cos(Y)+
-    Math.sin(Y)*Math.cos(Z)+
-    Math.sin(Z)*Math.cos(X)+
-    p.phase;
-
-
-  const gradApprox=2.4*k;
-  const gyroid=Math.abs(g)/gradApprox-p.thickness/2;
-
+  // Local gradient normalization gives a more consistent physical wall
+  // thickness than the previous fixed 2.4*k approximation.
+  const gx=k*(cx*cy-sz*sx);
+  const gy=k*(cy*cz-sx*sy);
+  const gz=k*(cx*cz-sy*sz);
+  const grad=Math.sqrt(gx*gx+gy*gy+gz*gz);
+  const safeGrad=Math.max(grad,k*.55);
+  const gyroid=Math.abs(g)/safeGrad-p.thickness/2;
 
   return Math.max(gyroid,baseSDF(x,y,z,p.D));
 }
-
 
 const corners=[
   [0,0,0],[1,0,0],[1,1,0],[0,1,0],
@@ -288,7 +287,10 @@ function build(p){
   // Use a consistent nominal cell size and add exterior padding.
   // The base SDF becomes positive outside the actual shape, so the
   // surface can close naturally instead of being clipped at the grid.
-  const nominalStep=maxD/p.resolution;
+  // At least 12 grid cells per gyroid period prevents high-period
+  // settings from being undersampled and developing missing walls/holes.
+  const effectiveResolution=Math.max(p.resolution,Math.ceil(p.periods*12));
+  const nominalStep=maxD/effectiveResolution;
   const margin=Math.max(nominalStep*2,p.thickness+nominalStep*2);
 
 
@@ -316,7 +318,7 @@ function build(p){
   const oz=-d/2-margin;
 
 
-  const vals=new Float32Array(total);
+  const vals=new Float64Array(total);
   const xyz=new Float32Array(total*3);
   const id=(i,j,k)=>(i*sy+j)*sz+k;
 
@@ -343,43 +345,42 @@ function build(p){
   const pos=[];
   const faces=[];
   const edgeCache=new Map();
+  const nodeCache=new Map();
+  const zeroTolerance=1e-12*Math.max(1,p.maxD);
 
+  // Reuse one vertex whenever the isosurface passes through a grid node.
+  // Separate copies at exact-zero nodes can otherwise leave tiny cracks.
+  function nodeVertex(a){
+    if(nodeCache.has(a))return nodeCache.get(a);
+    const A=a*3,idx=pos.length/3;
+    pos.push(xyz[A],xyz[A+1],xyz[A+2]);
+    nodeCache.set(a,idx);
+    return idx;
+  }
 
-  // Each lattice edge has one unique interpolated surface vertex.
   function vertex(a,b){
-    const lo=Math.min(a,b);
-    const hi=Math.max(a,b);
-    const key=lo+','+hi;
+    const va=vals[a],vb=vals[b];
+    if(Math.abs(va)<=zeroTolerance)return nodeVertex(a);
+    if(Math.abs(vb)<=zeroTolerance)return nodeVertex(b);
 
-
+    const lo=Math.min(a,b),hi=Math.max(a,b),key=lo+','+hi;
     if(edgeCache.has(key))return edgeCache.get(key);
 
-
-    const va=vals[a];
-    const vb=vals[b];
     const den=va-vb;
-
-
-    let t=Math.abs(den)<1e-20?.5:va/den;
+    let t=Math.abs(den)<1e-30?.5:va/den;
     t=Math.max(0,Math.min(1,t));
+    if(t<=1e-12)return nodeVertex(a);
+    if(t>=1-1e-12)return nodeVertex(b);
 
-
-    const A=a*3;
-    const B=b*3;
-    const idx=pos.length/3;
-
-
+    const A=a*3,B=b*3,idx=pos.length/3;
     pos.push(
       xyz[A]+(xyz[B]-xyz[A])*t,
       xyz[A+1]+(xyz[B+1]-xyz[A+1])*t,
       xyz[A+2]+(xyz[B+2]-xyz[A+2])*t
     );
-
-
     edgeCache.set(key,idx);
     return idx;
   }
-
 
   function point(id){
     return new THREE.Vector3(
@@ -695,8 +696,10 @@ function build(p){
     }
 
 
-    const largest=Math.max(0,...components.map(c=>c.length));
-    const minimum=Math.max(12,Math.floor(largest*.0005));
+    const largest=components.reduce((m,c)=>Math.max(m,c.length),0);
+    // Remove only very small numerical specks; retain small legitimate
+    // connected gyroid components instead of aggressively deleting them.
+    const minimum=Math.max(8,Math.floor(largest*.00005));
 
 
     const keep=new Uint8Array(faces.length/3);
@@ -922,9 +925,9 @@ $('bounds').onchange=()=>updateBounds(dims());
   'periods','thick','phase','quality','cleanup'
 ].forEach(id=>{
   $(id).addEventListener('input',()=>{
-    if(id==='periods')('periods').value;
-    if(id==='thick')('thick').value;
-    if(id==='phase')('phase').value;
+    if(id==='periods')$('periodsOut').textContent=$(id).value;
+    if(id==='thick')$('thickOut').textContent=Number($(id).value).toFixed(1);
+    if(id==='phase')$('phaseOut').textContent=Number($(id).value).toFixed(2);
     schedule();
   });
 });
