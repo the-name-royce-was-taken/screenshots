@@ -1,0 +1,960 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gyroid Generator</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#11151d;color:#e9edf4;font:14px system-ui}
+header{padding:16px 20px;border-bottom:1px solid #303847}
+h1{font-size:19px;margin:0}
+main{display:grid;grid-template-columns:310px 1fr;min-height:calc(100vh - 55px)}
+aside{padding:16px;background:#191f29;border-right:1px solid #303847;overflow:auto}
+section{margin-bottom:20px}
+h2{font-size:12px;color:#9daabc;text-transform:uppercase;margin:0 0 10px}
+label{display:flex;justify-content:space-between;margin:9px 0 5px}
+input,select,button{background:#232b38;color:#eef2f8;border:1px solid #394556;border-radius:7px;padding:8px;font:inherit}
+input,select{width:100%}
+input[type=range]{padding:0;accent-color:#67ccb4}
+input[type=checkbox]{width:auto}
+button{cursor:pointer}
+button:hover{border-color:#67ccb4}
+button:disabled{opacity:.5;cursor:wait}
+.primary{background:#67ccb4;color:#071c17;font-weight:700;border-color:#67ccb4}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.check{display:flex;gap:8px;align-items:center;color:#b8c2d0;margin:9px 0}
+.check label{margin:0}
+#viewport{position:relative;min-height:420px;overflow:hidden;border:1px solid #303847;border-radius:10px;background:#131a24}
+#viewport canvas{display:block;width:100%;height:100%}
+.workspace{padding:15px;display:flex;flex-direction:column;gap:10px;min-width:0}
+#status{color:#a6b2c2;font-size:12px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.actions button{flex:1;min-width:120px}
+.hint{font-size:12px;color:#98a6b9;margin-top:8px;line-height:1.5}
+.overlay{position:absolute;top:12px;left:12px;padding:6px 9px;background:#10151dc9;color:#aab6c5;border-radius:6px;pointer-events:none;font-size:12px}
+@media(max-width:800px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid #303847}#viewport{min-height:55vh}}
+</style>
+</head>
+<body>
+<header><h1>Gyroid Generator</h1></header>
+<main>
+<aside>
+<section>
+<h2>Base Shape</h2>
+<label>Shape</label>
+<select id="shape">
+<option value="sphere">Sphere</option>
+<option value="cylinder">Cylinder</option>
+<option value="box">Cuboid</option>
+</select>
+<div id="sphereFields">
+<label>Diameter (mm)</label><input id="diameter" type="number" value="60" min="5" max="300">
+</div>
+<div id="cylinderFields" hidden>
+<label>Diameter (mm)</label><input id="cylD" type="number" value="60" min="5" max="300">
+<label>Height (mm)</label><input id="cylH" type="number" value="60" min="5" max="300">
+</div>
+<div id="boxFields" hidden>
+<label>Width (mm)</label><input id="boxW" type="number" value="60" min="5" max="300">
+<label>Height (mm)</label><input id="boxH" type="number" value="60" min="5" max="300">
+<label>Depth (mm)</label><input id="boxD" type="number" value="60" min="5" max="300">
+</div>
+</section>
+
+
+<section>
+<h2>Gyroid</h2>
+<label>Periods <span id="periodsOut">3</span></label>
+<input id="periods" type="range" min="1" max="10" step=".25" value="3">
+<label>Wall thickness (mm) <span id="thickOut">2</span></label>
+<input id="thick" type="range" min=".5" max="6" step=".1" value="2">
+<label>Phase offset <span id="phaseOut">0</span></label>
+<input id="phase" type="range" min="-1" max="1" step=".05" value="0">
+</section>
+
+
+<section>
+<h2>Mesh Quality</h2>
+<label>Resolution</label>
+<select id="quality">
+<option value="32">Low · smaller file</option>
+<option value="48" selected>Medium</option>
+<option value="72">High</option>
+<option value="96">Ultra</option>
+<option value="120">Extreme</option>
+</select>
+<div class="hint">Higher resolution improves curved surfaces but increases computation time and file size.</div>
+<div class="check"><input type="checkbox" id="cleanup" checked><label for="cleanup">Remove tiny disconnected fragments</label></div>
+</section>
+
+
+<section>
+<h2>Display</h2>
+<div class="check"><input type="checkbox" id="wire"><label for="wire">Wireframe</label></div>
+<div class="check"><input type="checkbox" id="bounds"><label for="bounds">Show bounds</label></div>
+</section>
+
+
+<section>
+<h2>Export</h2>
+<div class="actions">
+<button class="primary" id="stl">Export Binary STL</button>
+<button id="obj">Export OBJ</button>
+</div>
+<div class="hint">Binary STL is usually smaller than text-based STL.</div>
+</section>
+</aside>
+
+
+<div class="workspace">
+<div id="viewport"><div class="overlay">Drag rotate · Scroll zoom · Right drag pan</div></div>
+<div id="status">Starting…</div>
+<div class="actions">
+<button class="primary" id="regen">Regenerate</button>
+<button id="reset">Reset camera</button>
+</div>
+</div>
+</main>
+
+
+<script type="importmap">
+{"imports":{
+"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {STLExporter} from 'three/addons/exporters/STLExporter.js';
+import {OBJExporter} from 'three/addons/exporters/OBJExporter.js';
+
+
+const $=id=>document.getElementById(id);
+const viewport=$('viewport');
+
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x131a24);
+
+
+const camera=new THREE.PerspectiveCamera(40,1,.1,10000);
+const renderer=new THREE.WebGLRenderer({
+  antialias:true,
+  powerPreference:'high-performance'
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+viewport.appendChild(renderer.domElement);
+
+
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true;
+controls.dampingFactor=.07;
+
+
+scene.add(new THREE.HemisphereLight(0xffffff,0x49556b,2));
+const light=new THREE.DirectionalLight(0xffffff,2.2);
+light.position.set(100,150,100);
+scene.add(light);
+const fill=new THREE.DirectionalLight(0x8abaff,.7);
+fill.position.set(-100,-50,-80);
+scene.add(fill);
+
+
+const grid=new THREE.GridHelper(300,30,0x374658,0x283442);
+scene.add(grid);
+
+
+const mat=new THREE.MeshStandardMaterial({
+  color:0x67ccb4,
+  roughness:.43,
+  metalness:.06,
+  side:THREE.DoubleSide
+});
+
+
+let mesh=null,bounds=null,working=false,queued=false,timer=null;
+
+
+function dims(){
+  const shape=$('shape').value;
+  const val=id=>Math.max(5,Math.min(300,Number($(id).value)||60));
+  if(shape==='sphere'){
+    let d=val('diameter');
+    return [d,d,d];
+  }
+  if(shape==='cylinder')return [val('cylD'),val('cylH'),val('cylD')];
+  return [val('boxW'),val('boxH'),val('boxD')];
+}
+
+
+function sdfBox(x,y,z,hx,hy,hz){
+  const qx=Math.abs(x)-hx;
+  const qy=Math.abs(y)-hy;
+  const qz=Math.abs(z)-hz;
+  return Math.hypot(
+    Math.max(qx,0),
+    Math.max(qy,0),
+    Math.max(qz,0)
+  )+Math.min(Math.max(qx,qy,qz),0);
+}
+
+
+function baseSDF(x,y,z,D){
+  const [w,h,d]=D;
+  const shape=$('shape').value;
+
+
+  if(shape==='sphere')return Math.hypot(x,y,z)-w/2;
+
+
+  if(shape==='cylinder'){
+    const a=Math.hypot(x,z)-w/2;
+    const b=Math.abs(y)-h/2;
+    return Math.hypot(Math.max(a,0),Math.max(b,0))
+      +Math.min(Math.max(a,b),0);
+  }
+
+
+  return sdfBox(x,y,z,w/2,h/2,d/2);
+}
+
+
+function getP(){
+  const D=dims(),maxD=Math.max(...D);
+  return {
+    D,
+    maxD,
+    periods:Number($('periods').value),
+    thickness:Number($('thick').value),
+    phase:Number($('phase').value),
+    resolution:Number($('quality').value),
+    cleanup:$('cleanup').checked
+  };
+}
+
+
+function field(x,y,z,p){
+  const k=2*Math.PI*p.periods/p.maxD;
+  const X=x*k,Y=y*k,Z=z*k;
+
+
+  const g=
+    Math.sin(X)*Math.cos(Y)+
+    Math.sin(Y)*Math.cos(Z)+
+    Math.sin(Z)*Math.cos(X)+
+    p.phase;
+
+
+  const gradApprox=2.4*k;
+  const gyroid=Math.abs(g)/gradApprox-p.thickness/2;
+
+
+  return Math.max(gyroid,baseSDF(x,y,z,p.D));
+}
+
+
+const corners=[
+  [0,0,0],[1,0,0],[1,1,0],[0,1,0],
+  [0,0,1],[1,0,1],[1,1,1],[0,1,1]
+];
+
+
+const tets=[
+  [0,5,1,6],
+  [0,1,2,6],
+  [0,2,3,6],
+  [0,3,7,6],
+  [0,7,4,6],
+  [0,4,5,6]
+];
+
+
+const tetEdges=[
+  [0,1],[0,2],[0,3],
+  [1,2],[1,3],[2,3]
+];
+
+
+function build(p){
+  const [w,h,d]=p.D;
+  const maxD=p.maxD;
+
+
+  // Use a consistent nominal cell size and add exterior padding.
+  // The base SDF becomes positive outside the actual shape, so the
+  // surface can close naturally instead of being clipped at the grid.
+  const nominalStep=maxD/p.resolution;
+  const margin=Math.max(nominalStep*2,p.thickness+nominalStep*2);
+
+
+  const nx=Math.max(12,Math.ceil((w+2*margin)/nominalStep));
+  const ny=Math.max(12,Math.ceil((h+2*margin)/nominalStep));
+  const nz=Math.max(12,Math.ceil((d+2*margin)/nominalStep));
+
+
+  const sx=nx+1,sy=ny+1,sz=nz+1;
+  const total=sx*sy*sz;
+
+
+  if(total>16000000){
+    throw new Error('Grid too large. Reduce resolution or dimensions.');
+  }
+
+
+  const dx=(w+2*margin)/nx;
+  const dy=(h+2*margin)/ny;
+  const dz=(d+2*margin)/nz;
+
+
+  const ox=-w/2-margin;
+  const oy=-h/2-margin;
+  const oz=-d/2-margin;
+
+
+  const vals=new Float32Array(total);
+  const xyz=new Float32Array(total*3);
+  const id=(i,j,k)=>(i*sy+j)*sz+k;
+
+
+  // Sample every lattice point exactly once.
+  for(let i=0;i<=nx;i++){
+    for(let j=0;j<=ny;j++){
+      for(let k=0;k<=nz;k++){
+        const x=ox+i*dx;
+        const y=oy+j*dy;
+        const z=oz+k*dz;
+        const idx=id(i,j,k);
+
+
+        xyz[idx*3]=x;
+        xyz[idx*3+1]=y;
+        xyz[idx*3+2]=z;
+        vals[idx]=field(x,y,z,p);
+      }
+    }
+  }
+
+
+  const pos=[];
+  const faces=[];
+  const edgeCache=new Map();
+
+
+  // Each lattice edge has one unique interpolated surface vertex.
+  function vertex(a,b){
+    const lo=Math.min(a,b);
+    const hi=Math.max(a,b);
+    const key=lo+','+hi;
+
+
+    if(edgeCache.has(key))return edgeCache.get(key);
+
+
+    const va=vals[a];
+    const vb=vals[b];
+    const den=va-vb;
+
+
+    let t=Math.abs(den)<1e-20?.5:va/den;
+    t=Math.max(0,Math.min(1,t));
+
+
+    const A=a*3;
+    const B=b*3;
+    const idx=pos.length/3;
+
+
+    pos.push(
+      xyz[A]+(xyz[B]-xyz[A])*t,
+      xyz[A+1]+(xyz[B+1]-xyz[A+1])*t,
+      xyz[A+2]+(xyz[B+2]-xyz[A+2])*t
+    );
+
+
+    edgeCache.set(key,idx);
+    return idx;
+  }
+
+
+  function point(id){
+    return new THREE.Vector3(
+      pos[id*3],
+      pos[id*3+1],
+      pos[id*3+2]
+    );
+  }
+
+
+  function distanceSq(a,b){
+    const x=pos[a*3]-pos[b*3];
+    const y=pos[a*3+1]-pos[b*3+1];
+    const z=pos[a*3+2]-pos[b*3+2];
+    return x*x+y*y+z*z;
+  }
+
+
+  // Exact gradient of the linear scalar field inside one tetrahedron.
+  // This avoids the unstable centre-difference gradient that could
+  // flip or misorder the intersection polygon.
+  function tetraGradient(ids){
+    const p0=new THREE.Vector3(
+      xyz[ids[0]*3],
+      xyz[ids[0]*3+1],
+      xyz[ids[0]*3+2]
+    );
+
+
+    const p1=new THREE.Vector3(
+      xyz[ids[1]*3],
+      xyz[ids[1]*3+1],
+      xyz[ids[1]*3+2]
+    );
+
+
+    const p2=new THREE.Vector3(
+      xyz[ids[2]*3],
+      xyz[ids[2]*3+1],
+      xyz[ids[2]*3+2]
+    );
+
+
+    const p3=new THREE.Vector3(
+      xyz[ids[3]*3],
+      xyz[ids[3]*3+1],
+      xyz[ids[3]*3+2]
+    );
+
+
+    const a=p1.sub(p0);
+    const b=p2.sub(p0);
+    const c=p3.sub(p0);
+
+
+    const c1=new THREE.Vector3().crossVectors(b,c);
+    const c2=new THREE.Vector3().crossVectors(c,a);
+    const c3=new THREE.Vector3().crossVectors(a,b);
+
+
+    const det=a.dot(c1);
+
+
+    if(Math.abs(det)<1e-20)return new THREE.Vector3();
+
+
+    const f0=vals[ids[0]];
+    const f1=vals[ids[1]];
+    const f2=vals[ids[2]];
+    const f3=vals[ids[3]];
+
+
+    return c1.multiplyScalar(f1-f0)
+      .add(c2.multiplyScalar(f2-f0))
+      .add(c3.multiplyScalar(f3-f0))
+      .divideScalar(det);
+  }
+
+
+  function orderPolygon(ids,normal){
+    const center=new THREE.Vector3();
+
+
+    for(const index of ids)center.add(point(index));
+    center.multiplyScalar(1/ids.length);
+
+
+    // Build a stable basis perpendicular to the exact tetra gradient.
+    const reference=Math.abs(normal.x)<.8
+      ?new THREE.Vector3(1,0,0)
+      :new THREE.Vector3(0,1,0);
+
+
+    const u=new THREE.Vector3()
+      .crossVectors(normal,reference);
+
+
+    if(u.lengthSq()<1e-20)return null;
+    u.normalize();
+
+
+    const v=new THREE.Vector3()
+      .crossVectors(normal,u)
+      .normalize();
+
+
+    return ids.slice().sort((a,b)=>{
+      const A=point(a).sub(center);
+      const B=point(b).sub(center);
+
+
+      return Math.atan2(A.dot(v),A.dot(u))-
+             Math.atan2(B.dot(v),B.dot(u));
+    });
+  }
+
+
+  function addTriangle(a,b,c,normal){
+    if(a===b||b===c||c===a)return;
+
+
+    const A=point(a);
+    const B=point(b);
+    const C=point(c);
+
+
+    const faceNormal=new THREE.Vector3()
+      .crossVectors(B.clone().sub(A),C.clone().sub(A));
+
+
+    // Reject zero-area or numerically unstable triangles.
+    if(faceNormal.lengthSq()<1e-16)return;
+
+
+    if(faceNormal.dot(normal)<0){
+      const temp=b;
+      b=c;
+      c=temp;
+    }
+
+
+    faces.push(a,b,c);
+  }
+
+
+  function polygon(ids,normal){
+    ids=[...new Set(ids)];
+    if(ids.length<3)return;
+
+
+    if(normal.lengthSq()<1e-20)return;
+    normal=normal.clone().normalize();
+
+
+    const sorted=orderPolygon(ids,normal);
+    if(!sorted)return;
+
+
+    if(sorted.length===3){
+      addTriangle(sorted[0],sorted[1],sorted[2],normal);
+      return;
+    }
+
+
+    if(sorted.length===4){
+      // A tetrahedron's four-point intersection is planar.
+      // Choose the shorter diagonal to reduce skinny triangles.
+      if(distanceSq(sorted[0],sorted[2])<=
+         distanceSq(sorted[1],sorted[3])){
+        addTriangle(sorted[0],sorted[1],sorted[2],normal);
+        addTriangle(sorted[0],sorted[2],sorted[3],normal);
+      }else{
+        addTriangle(sorted[0],sorted[1],sorted[3],normal);
+        addTriangle(sorted[1],sorted[2],sorted[3],normal);
+      }
+    }
+  }
+
+
+  function tetra(ids){
+    const inside=[];
+    const outside=[];
+
+
+    for(const id of ids){
+      if(vals[id]<0)inside.push(id);
+      else outside.push(id);
+    }
+
+
+    if(inside.length===0||inside.length===4)return;
+
+
+    const hits=[];
+
+
+    for(const [a,b] of tetEdges){
+      const A=ids[a];
+      const B=ids[b];
+
+
+      if((vals[A]<0)!==(vals[B]<0)){
+        hits.push(vertex(A,B));
+      }
+    }
+
+
+    if(hits.length<3)return;
+
+
+    // The scalar field increases from the interior to the exterior.
+    // This exact local gradient determines the polygon's outward normal.
+    const normal=tetraGradient(ids);
+
+
+    if(normal.lengthSq()<1e-20){
+      const insideCenter=new THREE.Vector3();
+      const outsideCenter=new THREE.Vector3();
+
+
+      for(const id of inside){
+        insideCenter.add(new THREE.Vector3(
+          xyz[id*3],xyz[id*3+1],xyz[id*3+2]
+        ));
+      }
+
+
+      for(const id of outside){
+        outsideCenter.add(new THREE.Vector3(
+          xyz[id*3],xyz[id*3+1],xyz[id*3+2]
+        ));
+      }
+
+
+      insideCenter.multiplyScalar(1/inside.length);
+      outsideCenter.multiplyScalar(1/outside.length);
+      normal.subVectors(outsideCenter,insideCenter);
+    }
+
+
+    polygon(hits,normal);
+  }
+
+
+  // March all cubes using the same conforming six-tetrahedron split.
+  for(let i=0;i<nx;i++){
+    for(let j=0;j<ny;j++){
+      for(let k=0;k<nz;k++){
+        const cube=corners.map(([a,b,c])=>id(i+a,j+b,k+c));
+
+
+        for(const t of tets){
+          tetra(t.map(q=>cube[q]));
+        }
+      }
+    }
+  }
+
+
+  // Optional connected-component cleanup.
+  // This removes only tiny isolated islands, not individual triangles.
+  let finalFaces=faces;
+
+
+  if(p.cleanup&&faces.length){
+    const vertexFaces=new Map();
+
+
+    for(let f=0;f<faces.length/3;f++){
+      for(let q=0;q<3;q++){
+        const v=faces[f*3+q];
+        if(!vertexFaces.has(v))vertexFaces.set(v,[]);
+        vertexFaces.get(v).push(f);
+      }
+    }
+
+
+    const visited=new Uint8Array(faces.length/3);
+    const components=[];
+    const stack=[];
+
+
+    for(let f=0;f<visited.length;f++){
+      if(visited[f])continue;
+
+
+      const component=[];
+      stack.push(f);
+      visited[f]=1;
+
+
+      while(stack.length){
+        const current=stack.pop();
+        component.push(current);
+
+
+        for(let q=0;q<3;q++){
+          const v=faces[current*3+q];
+          const adjacent=vertexFaces.get(v)||[];
+
+
+          for(const other of adjacent){
+            if(!visited[other]){
+              visited[other]=1;
+              stack.push(other);
+            }
+          }
+        }
+      }
+
+
+      components.push(component);
+    }
+
+
+    const largest=Math.max(0,...components.map(c=>c.length));
+    const minimum=Math.max(12,Math.floor(largest*.0005));
+
+
+    const keep=new Uint8Array(faces.length/3);
+
+
+    for(const component of components){
+      if(component.length>=minimum){
+        for(const f of component)keep[f]=1;
+      }
+    }
+
+
+    finalFaces=[];
+
+
+    for(let f=0;f<keep.length;f++){
+      if(keep[f]){
+        finalFaces.push(
+          faces[f*3],
+          faces[f*3+1],
+          faces[f*3+2]
+        );
+      }
+    }
+  }
+
+
+  if(finalFaces.length===0){
+    throw new Error('No surface generated. Try changing the period or thickness.');
+  }
+
+
+  const geometry=new THREE.BufferGeometry();
+
+
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(pos,3)
+  );
+
+
+  geometry.setIndex(finalFaces);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+
+
+  return geometry;
+}
+
+
+function cameraFit(D){
+  const maxD=Math.max(...D);
+  const fov=THREE.MathUtils.degToRad(camera.fov);
+  const dist=(maxD*.65)/Math.sin(fov/2)*1.15;
+
+
+  camera.position.set(dist*.8,dist*.65,dist);
+  camera.near=Math.max(.01,dist/1000);
+  camera.far=dist*20;
+  camera.updateProjectionMatrix();
+
+
+  controls.target.set(0,0,0);
+  controls.update();
+}
+
+
+function updateBounds(D){
+  if(bounds){
+    scene.remove(bounds);
+    bounds.geometry.dispose();
+    bounds.material.dispose();
+    bounds=null;
+  }
+
+
+  if(!$('bounds').checked)return;
+
+
+  const box=new THREE.BoxGeometry(...D);
+
+
+  bounds=new THREE.LineSegments(
+    new THREE.EdgesGeometry(box),
+    new THREE.LineBasicMaterial({color:0xf0b45d})
+  );
+
+
+  scene.add(bounds);
+  box.dispose();
+}
+
+
+function setModel(g){
+  if(mesh){
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+  }
+
+
+  mesh=new THREE.Mesh(g,mat);
+  mesh.material.wireframe=$('wire').checked;
+  scene.add(mesh);
+}
+
+
+async function generate(){
+  if(working){
+    queued=true;
+    return;
+  }
+
+
+  working=true;
+  $('regen').disabled=true;
+  $('status').textContent='Generating mesh…';
+
+
+  await new Promise(r=>setTimeout(r,30));
+
+
+  try{
+    const p=getP();
+    const start=performance.now();
+    const g=build(p);
+
+
+    setModel(g);
+    updateBounds(p.D);
+    cameraFit(p.D);
+
+
+    const tri=g.index.count/3;
+    const mb=(
+      g.attributes.position.array.byteLength+
+      g.index.array.byteLength
+    )/1048576;
+
+
+    $('status').textContent=
+      `${g.attributes.position.count.toLocaleString()} vertices · `+
+      `${tri.toLocaleString()} triangles · `+
+      `${mb.toFixed(2)} MB · `+
+      `${((performance.now()-start)/1000).toFixed(1)}s`;
+
+
+  }catch(e){
+    console.error(e);
+    $('status').textContent='Generation error: '+e.message;
+  }finally{
+    working=false;
+    $('regen').disabled=false;
+
+
+    if(queued){
+      queued=false;
+      generate();
+    }
+  }
+}
+
+
+function schedule(){
+  clearTimeout(timer);
+  timer=setTimeout(generate,300);
+}
+
+
+function download(blob,name){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=name;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1500);
+}
+
+
+$('stl').onclick=()=>{
+  if(!mesh)return;
+  const data=new STLExporter().parse(mesh,{binary:true});
+  download(
+    new Blob([data],{type:'application/octet-stream'}),
+    'gyroid.stl'
+  );
+};
+
+
+$('obj').onclick=()=>{
+  if(!mesh)return;
+  download(
+    new Blob([new OBJExporter().parse(mesh)],{type:'text/plain'}),
+    'gyroid.obj'
+  );
+};
+
+
+$('shape').onchange=()=>{
+  const s=$('shape').value;
+  $('sphereFields').hidden=s!=='sphere';
+  $('cylinderFields').hidden=s!=='cylinder';
+  $('boxFields').hidden=s!=='box';
+  schedule();
+};
+
+
+$('regen').onclick=generate;
+$('reset').onclick=()=>cameraFit(dims());
+
+
+$('wire').onchange=()=>{
+  if(mesh)mesh.material.wireframe=$('wire').checked;
+};
+
+
+$('bounds').onchange=()=>updateBounds(dims());
+
+
+[
+  'diameter','cylD','cylH',
+  'boxW','boxH','boxD',
+  'periods','thick','phase','quality','cleanup'
+].forEach(id=>{
+  $(id).addEventListener('input',()=>{
+    if(id==='periods')('periods').value;
+    if(id==='thick')('thick').value;
+    if(id==='phase')('phase').value;
+    schedule();
+  });
+});
+
+
+function resize(){
+  const w=Math.max(1,viewport.clientWidth);
+  const h=Math.max(1,viewport.clientHeight);
+
+
+  camera.aspect=w/h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w,h,false);
+}
+
+
+new ResizeObserver(resize).observe(viewport);
+window.addEventListener('resize',resize);
+resize();
+
+
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene,camera);
+}
+
+
+animate();
+generate();
+</script>
+</body>
+</html>
