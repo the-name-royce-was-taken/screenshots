@@ -15,7 +15,6 @@ import type { GridSdfSampler } from '../geometry/marching-cubes';
 import { openField, openingIsResolvable } from '../geometry/morphology';
 import { buildSampleShapeLattice, buildSurfaceHexLattice, buildSphereLattice } from '../geometry/lattice';
 import {
-  DEFAULT_SAMPLE_SPHERE_RADIUS,
   SAMPLE_SHAPE_DIMENSIONS,
   sampleShapeBounds,
   sampleShapeObjectSdf,
