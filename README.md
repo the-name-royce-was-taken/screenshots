@@ -1,3 +1,24 @@
+# Royce's Gyroid Generator
+
+This repository now runs the [OpenLattice3D](https://github.com/esaueng/OpenLattice3D) application, including its Gyroid TPMS generator, browser-based worker pipeline, mesh validation, and STL/OBJ/3MF export.
+
+The previous standalone prototype is retained as [Gyroid-gen-1.html](./Gyroid-gen-1.html).
+
+## Run locally
+
+- Install Node.js 22 or newer.
+- Run `npm ci`.
+- Run `npm run dev`.
+- Open the local Vite URL shown in the terminal.
+
+## Build
+
+Run `npm run build`. The production site is written to `dist/`.
+
+OpenLattice3D is licensed under Apache-2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE) for attribution and license terms.
+
+---
+
 # OpenLattice3D
 
 A browser-based tool for generating 3D-printable lattice structures inside arbitrary meshes. It supports twelve lattice types — TPMS sheets (Gyroid, Schwarz P, Schwarz D, Neovius, IWP), strut lattices (BCC, Octet, Diamond, Hexagon, Triangle), and stochastic structures (Voronoi foam, Spinodal) — with SDF-based geometry processing and marching-cubes mesh extraction. All model processing runs locally in browser Web Workers; no model-upload service is required.
