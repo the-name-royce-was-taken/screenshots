@@ -163,14 +163,15 @@ export function sampleSurfacePointForShape(
     const halfHeight = params.halfHeight ?? halfSize;
     const face = Math.floor(random() * 6);
     const u = (random() * 2 - 1) * halfSize;
-    const v = (random() * 2 - 1) * halfHeight;
+    const v = (random() * 2 - 1) * halfSize;
+    const w = (random() * 2 - 1) * halfHeight;
     switch (face) {
-      case 0: return { pos: [halfSize, u, v], normal: [1, 0, 0] };
-      case 1: return { pos: [-halfSize, u, v], normal: [-1, 0, 0] };
-      case 2: return { pos: [u, halfSize, v], normal: [0, 1, 0] };
-      case 3: return { pos: [u, -halfSize, v], normal: [0, -1, 0] };
-      case 4: return { pos: [u, u, halfHeight], normal: [0, 0, 1] };
-      default: return { pos: [u, u, -halfHeight], normal: [0, 0, -1] };
+      case 0: return { pos: [halfSize, u, w], normal: [1, 0, 0] };
+      case 1: return { pos: [-halfSize, u, w], normal: [-1, 0, 0] };
+      case 2: return { pos: [u, halfSize, w], normal: [0, 1, 0] };
+      case 3: return { pos: [u, -halfSize, w], normal: [0, -1, 0] };
+      case 4: return { pos: [u, v, halfHeight], normal: [0, 0, 1] };
+      default: return { pos: [u, v, -halfHeight], normal: [0, 0, -1] };
     }
   }
   if (shape === 'cylinder') {
