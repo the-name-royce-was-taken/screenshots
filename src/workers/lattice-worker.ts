@@ -467,8 +467,17 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
 
         const requestedRadius = msg.sphereRadius ?? 0;
         if (shape === 'sphere') sphereRadius = sampleSphereRadius(requestedRadius);
-        bounds = sampleShapeBounds(shape, requestedRadius, pad);
-        objectSdf = sampleShapeObjectSdf(shape, requestedRadius);
+        const shapeDimensions = {
+          sphereDiameter: params.sampleSphereDiameter,
+          cubeWidth: params.sampleCubeWidth,
+          cubeHeight: params.sampleCubeHeight,
+          cylinderDiameter: params.sampleCylinderDiameter,
+          cylinderHeight: params.sampleCylinderHeight,
+          torusInnerDiameter: params.sampleTorusInnerDiameter,
+          torusOuterDiameter: params.sampleTorusOuterDiameter,
+        };
+        bounds = sampleShapeBounds(shape, requestedRadius, pad, shapeDimensions);
+        objectSdf = sampleShapeObjectSdf(shape, requestedRadius, shapeDimensions);
         sdf = isSurfacePolygon
           ? objectSdf
           : buildSampleShapeLattice(shape, requestedRadius, fieldParams, generationSeed);
