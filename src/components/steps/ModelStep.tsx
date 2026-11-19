@@ -11,7 +11,7 @@ export function ModelStep({ inputs }: { inputs: WorkflowInputs }) {
   const store = useStore();
   const intake = useModelImport();
   const hasModel = Boolean(store.originalMesh || store.sphereMode);
-  const extents = modelExtents(store.meshInfo, store.sampleShape, store.sphereRadius);
+  const extents = modelExtents(store.meshInfo, store.sampleShape, store.sphereRadius, store.params);
   const meshCondition = store.meshInfo ? describeMeshCondition(store.meshInfo) : null;
   const notice = store.importNotice;
 
@@ -90,6 +90,28 @@ export function ModelStep({ inputs }: { inputs: WorkflowInputs }) {
         </div>
       </PanelSection>
 
+      {store.sampleShape && (
+        <PanelSection title="Shape dimensions">
+          <div className="shape-dimension-fields">
+            {store.sampleShape === 'sphere' && <DimensionField label="Diameter" value={store.params.sampleSphereDiameter} onChange={(v) => store.updateParams({ sampleSphereDiameter: v })} />}
+            {store.sampleShape === 'cube' && <>
+              <DimensionField label="Width" value={store.params.sampleCubeWidth} onChange={(v) => store.updateParams({ sampleCubeWidth: v })} />
+              <DimensionField label="Height" value={store.params.sampleCubeHeight} onChange={(v) => store.updateParams({ sampleCubeHeight: v })} />
+            </>}
+            {store.sampleShape === 'cylinder' && <>
+              <DimensionField label="Diameter" value={store.params.sampleCylinderDiameter} onChange={(v) => store.updateParams({ sampleCylinderDiameter: v })} />
+              <DimensionField label="Height" value={store.params.sampleCylinderHeight} onChange={(v) => store.updateParams({ sampleCylinderHeight: v })} />
+            </>}
+            {store.sampleShape === 'torus' && <>
+              <DimensionField label="Inner diameter" value={store.params.sampleTorusInnerDiameter} onChange={(v) => store.updateParams({ sampleTorusInnerDiameter: v })} />
+              <DimensionField label="Outer diameter" value={store.params.sampleTorusOuterDiameter} onChange={(v) => store.updateParams({ sampleTorusOuterDiameter: v })} />
+            </>}
+          </div>
+          {store.sampleShape === 'torus' && store.params.sampleTorusOuterDiameter <= store.params.sampleTorusInnerDiameter && <p className="field-hint" role="alert">Outer diameter must be greater than inner diameter.</p>}
+          <p className="field-hint">Enter dimensions in millimetres. Changes apply to the next generation.</p>
+        </PanelSection>
+      )}
+
       {hasModel && extents && (
         <PanelSection
           title="This part"
@@ -132,6 +154,25 @@ export function ModelStep({ inputs }: { inputs: WorkflowInputs }) {
         </PanelSection>
       )}
     </StepPanel>
+  );
+}
+
+function DimensionField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="dimension-field">
+      <span>{label} (mm)</span>
+      <input
+        type="number"
+        min="0.1"
+        max="1000"
+        step="0.1"
+        value={value}
+        onChange={(event) => {
+          const next = Number(event.target.value);
+          if (Number.isFinite(next) && next >= 0.1 && next <= 1000) onChange(next);
+        }}
+      />
+    </label>
   );
 }
 
