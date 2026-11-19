@@ -13,7 +13,6 @@ import {
   cubeSdf,
   cylinderSdf,
   SAMPLE_SHAPE_DIMENSIONS,
-  sampleSphereRadius,
   sphereSdf,
   torusSdf,
 } from './sample-shapes';
