@@ -33,11 +33,11 @@ export function sphereSdf(radius: number): ObjectSdf {
 }
 
 /** Axis-aligned cube centred at the origin. */
-export function cubeSdf(halfSize: number): ObjectSdf {
+export function cubeSdf(halfSize: number, halfHeight = halfSize): ObjectSdf {
   return (x, y, z) => {
     const dx = Math.abs(x) - halfSize;
     const dy = Math.abs(y) - halfSize;
-    const dz = Math.abs(z) - halfSize;
+    const dz = Math.abs(z) - halfHeight;
     const outside = Math.sqrt(Math.max(dx, 0) ** 2 + Math.max(dy, 0) ** 2 + Math.max(dz, 0) ** 2);
     const inside = Math.min(Math.max(dx, dy, dz), 0);
     return outside + inside;
