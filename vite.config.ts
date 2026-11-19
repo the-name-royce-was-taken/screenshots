@@ -36,6 +36,7 @@ const vendorChunk = (packages: string) => new RegExp(`[\\\\/]node_modules[\\\\/]
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: './',
   plugins: [react()],
   server: {
     // Dev stays without a CSP: Vite HMR injects inline scripts and styles.
