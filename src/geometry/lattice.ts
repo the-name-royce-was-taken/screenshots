@@ -1487,13 +1487,14 @@ export function buildSphereLattice(
 
 export function buildCubeLattice(
   halfSize: number,
+  halfHeight: number,
   params: LatticeParams,
   generationSeed = DEFAULT_GENERATION_SEED,
 ): SdfFunction {
   return buildAnalyticLattice(
-    cubeSdf(halfSize),
+    cubeSdf(halfSize, halfHeight),
     params,
-    { min: [-halfSize, -halfSize, -halfSize], max: [halfSize, halfSize, halfSize] },
+    { min: [-halfSize, -halfSize, -halfHeight], max: [halfSize, halfSize, halfHeight] },
     generationSeed,
   );
 }
@@ -1560,7 +1561,7 @@ export function buildSampleShapeLattice(
     case 'sphere':
       return buildSphereLattice(dimensions.sphereDiameter / 2, params, generationSeed);
     case 'cube':
-      return buildCubeLattice(dimensions.cubeWidth / 2, params, generationSeed);
+      return buildCubeLattice(dimensions.cubeWidth / 2, dimensions.cubeHeight / 2, params, generationSeed);
     case 'cylinder': {
       return buildCylinderLattice(dimensions.cylinderDiameter / 2, dimensions.cylinderHeight / 2, params, generationSeed);
     }
