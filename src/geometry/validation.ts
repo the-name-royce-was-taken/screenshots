@@ -1,0 +1,385 @@
+// Validation: check deviation, thickness, manifoldness, disconnected pieces
+import type { Vec3 } from './vec3';
+import type { MeshBVH } from './bvh';
+import type { LatticeParams, ValidationResult, ValidationWarning, ValidationWarningCode } from '../types/project';
+import type { MarchingCubesResult } from './marching-cubes';
+import { buildEdgeTopology, countEdgeDefects, findConnectedComponents } from './mesh-topology';
+import { sphereSdf } from './sample-shapes';
+import {
+  checkAnalyticOuterDeviation,
+  OUTER_DEVIATION_SAMPLE_COUNT,
+  type OuterDeviationMeasurement,
+} from './shape-deviation';
+
+/** Signed volume enclosed by a set of triangles (divergence theorem). */
+function signedVolumeOf(positions: Float32Array, triangles: number[]): number {
+  let volume = 0;
+  for (const triangle of triangles) {
+    const o = triangle * 9;
+    const ax = positions[o], ay = positions[o + 1], az = positions[o + 2];
+    const bx = positions[o + 3], by = positions[o + 4], bz = positions[o + 5];
+    const cx = positions[o + 6], cy = positions[o + 7], cz = positions[o + 8];
+    volume += (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6;
+  }
+  return volume;
+}
+
+/**
+ * Surface components are not solid bodies: a closed shell around a sheet
+ * lattice has one outer skin plus one closed surface per enclosed void
+ * network. Classify each component by the volume it encloses instead.
+ */
+export function checkTopology(result: MarchingCubesResult): {
+  manifold: { passed: boolean; details: string };
+  disconnected: { passed: boolean; fragmentCount: number; voidCount: number; sliverCount: number };
+} {
+  if (result.triCount === 0) {
+    return {
+      manifold: { passed: false, details: 'Mesh is empty; no printable surface' },
+      disconnected: { passed: false, fragmentCount: 0, voidCount: 0, sliverCount: 0 },
+    };
+  }
+  const topology = buildEdgeTopology(result.positions, result.triCount);
+
+  const { boundaryEdges, nonManifoldEdges } = countEdgeDefects(topology);
+  const manifoldPassed = boundaryEdges === 0 && nonManifoldEdges === 0;
+  const manifold = {
+    passed: manifoldPassed,
+    details: manifoldPassed
+      ? 'Mesh is manifold and watertight'
+      : `Non-manifold edges: ${nonManifoldEdges}, boundary edges: ${boundaryEdges}`,
+  };
+
+  const components = findConnectedComponents(topology);
+  const volumes = components.map((triangles) => signedVolumeOf(result.positions, triangles));
+  const largest = volumes.reduce((max, volume) => Math.max(max, Math.abs(volume)), 0);
+  // Anything under a millionth of the largest surface's volume is a numerical sliver.
+  const threshold = Math.max(1e-9, largest * 1e-6);
+  let fragmentCount = 0;
+  let voidCount = 0;
+  let sliverCount = 0;
+  for (const volume of volumes) {
+    if (volume > threshold) fragmentCount++;
+    else if (volume < -threshold) voidCount++;
+    else sliverCount++;
+  }
+  // An open mesh has no meaningful enclosed volume; fall back to surface counting.
+  if (!manifoldPassed && fragmentCount === 0) fragmentCount = components.length;
+  return {
+    manifold,
+    disconnected: { passed: fragmentCount === 1, fragmentCount, voidCount, sliverCount },
+  };
+}
+
+/** Shown whenever outer deviation was not measured (`sampled: 0`). */
+export const OUTER_DEVIATION_UNMEASURED_WARNING = 'Outer deviation could not be measured';
+/** Shown when there is neither a reference mesh nor an analytic shape to measure against. */
+export const NO_DEVIATION_REFERENCE_WARNING = 'No reference mesh for deviation check';
+/** Shown when no thickness ray produced a measurement (`sampled: 0`). */
+export const THICKNESS_UNMEASURED_WARNING = 'Minimum thickness could not be measured';
+/** Shown for FDM with an open lattice exterior. */
+export const FDM_OPEN_LATTICE_WARNING = 'FDM with open lattice exterior can be difficult to print';
+
+export function validationWarning(code: ValidationWarningCode, message: string): ValidationWarning {
+  return { code, message };
+}
+
+/**
+ * Both warning fields of a ValidationResult from one coded list, so the
+ * plain-text `warnings` kept for compatibility always match `warningDetails`.
+ */
+export function warningFields(details: readonly ValidationWarning[]): Pick<ValidationResult, 'warnings' | 'warningDetails'> {
+  return {
+    warnings: details.map((warning) => warning.message),
+    warningDetails: details.map((warning) => ({ ...warning })),
+  };
+}
+
+/** Append one coded warning to a result, keeping both warning fields in step. */
+export function appendValidationWarning(validation: ValidationResult, warning: ValidationWarning): void {
+  validation.warnings.push(warning.message);
+  if (validation.warningDetails) validation.warningDetails.push({ ...warning });
+}
+
+/** Warnings shared by both validation paths for checks that produced no samples. */
+export function unmeasuredWarnings(
+  outerDeviation: { sampled: number },
+  minThickness: { sampled: number },
+  hasDeviationReference: boolean,
+): ValidationWarning[] {
+  const warnings: ValidationWarning[] = [];
+  if (!hasDeviationReference) {
+    warnings.push(validationWarning('no-deviation-reference', NO_DEVIATION_REFERENCE_WARNING));
+  } else if (outerDeviation.sampled === 0) {
+    warnings.push(validationWarning('deviation-unmeasured', OUTER_DEVIATION_UNMEASURED_WARNING));
+  }
+  if (minThickness.sampled === 0) {
+    warnings.push(validationWarning('thickness-unmeasured', THICKNESS_UNMEASURED_WARNING));
+  }
+  return warnings;
+}
+
+/** Process-specific warnings, shared by both validation paths. */
+export function processWarnings(params: LatticeParams): ValidationWarning[] {
+  return params.processPreset === 'FDM' && params.variant === 'implicit_conformal'
+    ? [validationWarning('fdm-open-lattice', FDM_OPEN_LATTICE_WARNING)]
+    : [];
+}
+
+/**
+ * Outer deviation that was not measured. It fails and carries `sampled: 0`,
+ * the same representation `checkAnalyticOuterDeviation` uses, so it can never
+ * read as a 0 mm pass.
+ */
+export function unmeasuredOuterDeviation(): OuterDeviationMeasurement {
+  return { passed: false, maxDeviation: 0, sampled: 0 };
+}
+
+/** Check outer deviation: sample points on the result surface and measure distance to original mesh */
+export function checkOuterDeviation(
+  result: MarchingCubesResult,
+  originalBvh: MeshBVH,
+  tolerance: number,
+  sampleCount: number = OUTER_DEVIATION_SAMPLE_COUNT
+): OuterDeviationMeasurement {
+  // Only points outside the original mesh count as outer deviation.
+  return checkAnalyticOuterDeviation(
+    result,
+    (x, y, z) => originalBvh.signedDistance([x, y, z]),
+    tolerance,
+    sampleCount,
+  );
+}
+
+/** Check outer deviation for sphere (fast path) */
+export function checkSphereDeviation(
+  result: MarchingCubesResult,
+  radius: number,
+  tolerance: number,
+  sampleCount: number = OUTER_DEVIATION_SAMPLE_COUNT
+): OuterDeviationMeasurement {
+  return checkAnalyticOuterDeviation(result, sphereSdf(radius), tolerance, sampleCount);
+}
+
+function sdfNormal(
+  sdf: (x: number, y: number, z: number) => number,
+  x: number,
+  y: number,
+  z: number,
+  step: number,
+): Vec3 | null {
+  const gx = sdf(x + step, y, z) - sdf(x - step, y, z);
+  const gy = sdf(x, y + step, z) - sdf(x, y - step, z);
+  const gz = sdf(x, y, z + step) - sdf(x, y, z - step);
+  const magnitude = Math.hypot(gx, gy, gz);
+  if (!Number.isFinite(magnitude) || magnitude < 1e-12) return null;
+  return [gx / magnitude, gy / magnitude, gz / magnitude];
+}
+
+function bisectCrossing(
+  sdf: (x: number, y: number, z: number) => number,
+  origin: Vec3,
+  direction: Vec3,
+  inside: number,
+  outside: number,
+): number {
+  let insideDistance = inside;
+  let outsideDistance = outside;
+  for (let iteration = 0; iteration < 28; iteration++) {
+    const midpoint = (insideDistance + outsideDistance) * 0.5;
+    const value = sdf(
+      origin[0] + direction[0] * midpoint,
+      origin[1] + direction[1] * midpoint,
+      origin[2] + direction[2] * midpoint,
+    );
+    if (!Number.isFinite(value)) return Number.NaN;
+    if (value <= 0) insideDistance = midpoint;
+    else outsideDistance = midpoint;
+  }
+  return (insideDistance + outsideDistance) * 0.5;
+}
+
+/**
+ * Measure local wall thickness from the scalar-field gradient, not extracted
+ * triangle winding. Both field crossings are bisection-refined. The 1st
+ * percentile remains a representative measurement, while every measured ray
+ * must meet the required minimum for validation to pass.
+ */
+export const MAX_THIN_POINTS = 400;
+// A malformed/non-closing field or very large model must not make a ray
+// unbounded. Exhausting this budget is unmeasured, never an invented thickness.
+const MAX_THICKNESS_MARCH_STEPS = 4096;
+
+export function checkMinThickness(
+  sdf: (x: number, y: number, z: number) => number,
+  result: MarchingCubesResult,
+  minRequired: number,
+  sampleCount: number = 1500,
+  onProgress?: (fraction: number) => void,
+): { passed: boolean; minMeasured: number; absoluteMin: number; sampled: number; thinPoints: number[] } {
+  const { positions, triCount } = result;
+  const unavailable = { passed: false, minMeasured: 0, absoluteMin: 0, sampled: 0, thinPoints: [] };
+  if (!Number.isFinite(minRequired) || minRequired <= 0 || triCount === 0) return unavailable;
+  const stride = Math.max(1, Math.floor(triCount / sampleCount));
+  const marchStep = minRequired / 16;
+  if (marchStep === 0) return unavailable;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let offset = 0; offset < triCount * 9; offset += 3) {
+    for (let axis = 0; axis < 3; axis++) {
+      min[axis] = Math.min(min[axis], positions[offset + axis]);
+      max[axis] = Math.max(max[axis], positions[offset + axis]);
+    }
+  }
+  // A chord through the generated solid cannot exceed its bounds diagonal.
+  // Keep the existing short-ray range for partial surface probes, and add an
+  // outside step so a crossing on the opposite bound can be bracketed.
+  const diagonal = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+  const maxDepth = Math.max(minRequired * 4, diagonal + marchStep * 4);
+  if (!Number.isFinite(maxDepth)) return unavailable;
+  const gradientStep = Math.max(1e-4, minRequired * 0.01);
+  const thicknesses: number[] = [];
+  // Where the thin rays start, so the viewer can point at them.
+  const thinPoints: number[] = [];
+  const expected = Math.max(1, Math.ceil(triCount / stride));
+  let visited = 0;
+
+  for (let i = 0; i < triCount; i += stride) {
+    visited++;
+    if (onProgress && visited % 64 === 0) onProgress(visited / expected);
+    const o = i * 9;
+    const px = (positions[o] + positions[o + 3] + positions[o + 6]) / 3;
+    const py = (positions[o + 1] + positions[o + 4] + positions[o + 7]) / 3;
+    const pz = (positions[o + 2] + positions[o + 5] + positions[o + 8]) / 3;
+
+    const outward = sdfNormal(sdf, px, py, pz, gradientStep);
+    if (!outward) continue;
+    const inward: Vec3 = [-outward[0], -outward[1], -outward[2]];
+    const origin: Vec3 = [px, py, pz];
+
+    let seed = -1;
+    for (let distance = 0; distance <= marchStep * 4; distance += marchStep) {
+      if (sdf(
+        origin[0] + inward[0] * distance,
+        origin[1] + inward[1] * distance,
+        origin[2] + inward[2] * distance,
+      ) <= 0) {
+        seed = distance;
+        break;
+      }
+    }
+    if (seed < 0) continue;
+
+    const crossing = (sign: number): number => {
+      let lastInside = seed;
+      for (let step = 1; step <= MAX_THICKNESS_MARCH_STEPS; step++) {
+        const distance = Math.min(step * marchStep, maxDepth);
+        const candidate = seed + sign * distance;
+        const value = sdf(
+          origin[0] + inward[0] * candidate,
+          origin[1] + inward[1] * candidate,
+          origin[2] + inward[2] * candidate,
+        );
+        if (!Number.isFinite(value)) return Number.NaN;
+        if (value > 0) return bisectCrossing(sdf, origin, inward, lastInside, candidate);
+        lastInside = candidate;
+        if (distance >= maxDepth) break;
+      }
+      return Number.NaN;
+    };
+
+    const far = crossing(1);
+    const near = crossing(-1);
+    if (!Number.isFinite(far) || !Number.isFinite(near)) continue;
+    const thickness = far - near;
+    if (thickness > 0) {
+      thicknesses.push(thickness);
+      if (thickness < minRequired - 1e-3 && thinPoints.length < MAX_THIN_POINTS * 3) thinPoints.push(px, py, pz);
+    }
+  }
+
+  if (thicknesses.length === 0) {
+    // Keep numeric fields serializable; sampled=0 means unavailable, not 0mm.
+    return { passed: false, minMeasured: 0, absoluteMin: 0, sampled: 0, thinPoints };
+  }
+
+  thicknesses.sort((a, b) => a - b);
+  const percentileIndex = Math.min(
+    thicknesses.length - 1,
+    Math.floor(thicknesses.length * 0.01),
+  );
+  const minMeasured = thicknesses[percentileIndex];
+  const absoluteMin = thicknesses[0];
+  return {
+    passed: absoluteMin >= minRequired - 1e-3,
+    minMeasured,
+    absoluteMin,
+    sampled: thicknesses.length,
+    thinPoints,
+  };
+}
+
+/** Warnings derived from the body/void classification, shared by both validation paths. */
+export function topologyWarnings(
+  disconnected: { fragmentCount: number; voidCount: number; sliverCount: number },
+  params: LatticeParams,
+): ValidationWarning[] {
+  const warnings: ValidationWarning[] = [];
+  if (disconnected.fragmentCount > 1) {
+    warnings.push(validationWarning('multiple-bodies', `${disconnected.fragmentCount} separate solid bodies detected`));
+  }
+  if (disconnected.voidCount > 0 && !params.escapeHoles) {
+    warnings.push(validationWarning(
+      'trapped-voids',
+      `${disconnected.voidCount} enclosed void network${disconnected.voidCount === 1 ? '' : 's'} and no escape holes: trapped powder/resin likely`,
+    ));
+  }
+  if (disconnected.sliverCount > 0) {
+    warnings.push(validationWarning(
+      'zero-volume-slivers',
+      `${disconnected.sliverCount} zero-volume sliver${disconnected.sliverCount === 1 ? '' : 's'} (negligible, but present in the export)`,
+    ));
+  }
+  return warnings;
+}
+
+/** Run full validation suite */
+export function runValidation(
+  result: MarchingCubesResult,
+  sdf: (x: number, y: number, z: number) => number,
+  params: LatticeParams,
+  originalBvh: MeshBVH | null,
+  sphereRadius: number | null,
+): ValidationResult {
+  // Outer deviation. Without a reference there is nothing to measure against:
+  // report it as unmeasured (sampled 0, failing), never as a 0 mm pass.
+  let outerDeviation: OuterDeviationMeasurement;
+  if (sphereRadius !== null) {
+    outerDeviation = checkSphereDeviation(result, sphereRadius, params.toleranceMm);
+  } else if (originalBvh) {
+    outerDeviation = checkOuterDeviation(result, originalBvh, params.toleranceMm);
+  } else {
+    outerDeviation = unmeasuredOuterDeviation();
+  }
+
+  // Min thickness
+  const minThickness = checkMinThickness(sdf, result, params.minFeatureSize);
+
+  const { manifold, disconnected } = checkTopology(result);
+  const warnings = [
+    ...unmeasuredWarnings(outerDeviation, minThickness, sphereRadius !== null || Boolean(originalBvh)),
+    ...topologyWarnings(disconnected, params),
+    ...processWarnings(params),
+  ];
+
+  const passed = outerDeviation.passed && minThickness.passed && manifold.passed && disconnected.passed;
+
+  return {
+    passed,
+    outerDeviation: { ...outerDeviation, tolerance: params.toleranceMm },
+    minThickness: { ...minThickness, required: params.minFeatureSize },
+    manifold,
+    disconnected,
+    ...warningFields(warnings),
+  };
+}

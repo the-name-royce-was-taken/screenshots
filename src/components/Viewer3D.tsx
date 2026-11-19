@@ -1,0 +1,1483 @@
+// 3D Viewer component using react-three-fiber
+import { useRef, useMemo, useCallback, useEffect, useLayoutEffect, useState, type KeyboardEvent } from 'react';
+import { Canvas, useThree, useFrame, type RootState, type ThreeEvent } from '@react-three/fiber';
+import { Billboard, GizmoHelper, Line, OrbitControls } from '@react-three/drei';
+import * as THREE from 'three';
+import { useShallow } from 'zustand/react/shallow';
+import { useStore } from '../store/useStore';
+import { watchContextLoss } from '../analytics';
+import type { TriangleMesh } from '../geometry/stl-parser';
+import type { MarchingCubesResult } from '../geometry/marching-cubes';
+import type { ViewerCameraState, ViewerVector3 } from '../store/useStore';
+import type { SampleShape } from '../types/project';
+import {
+  CrossSectionView,
+  EscapeHolePreview,
+  generateSampleMesh,
+  meshBounds,
+  OriginalMeshView,
+  resultBounds,
+  ResultMeshView,
+  ThinFeatureMarkers,
+  XRayView,
+  SampleMeshView,
+  useRetainResultGeometries,
+} from './viewer/ViewerMeshViews';
+import { DemoGridView } from './viewer/DemoGridView';
+import {
+  finishOrbitControlsAfterCameraReset,
+  prepareOrbitControlsForCameraReset,
+  type ResettableOrbitControls,
+} from './viewer/orbit-controls-reset';
+import { BuildPlateGrid } from './viewer/BuildPlateGrid';
+import { buildPlateGridSpec, formatGridSpacing } from './viewer/build-plate-grid';
+import { resultHasClosedSkin } from './viewer/viewer-hints';
+import { UNADJUSTED_FRAMING, compactViewerFraming, type ViewerFraming } from './viewer/compact-framing';
+
+const VIEWPORT_PADDING = 1.2;
+const WORLD_UP = new THREE.Vector3(0, 0, 1);
+const ISO_VIEW_DIRECTION = new THREE.Vector3(1, 1, 1).normalize();
+const ISO_VIEW_UP = WORLD_UP.clone().projectOnPlane(ISO_VIEW_DIRECTION).normalize();
+
+const VIEWER_GIZMO_ALIGNMENT = 'bottom-right';
+const VIEWER_GIZMO_MARGIN: [number, number] = [112, 112];
+const VIEWER_GIZMO_SCALE = 40;
+// Narrow or short viewports (phones): a smaller cube in the top-right corner,
+// clear of the full-width toolbar at the bottom and of the centred part.
+const VIEWER_GIZMO_COMPACT_MAX_WIDTH = 600;
+const VIEWER_GIZMO_COMPACT_MAX_HEIGHT = 420;
+const VIEWER_GIZMO_COMPACT_ALIGNMENT = 'top-right';
+const VIEWER_GIZMO_COMPACT_MARGIN: [number, number] = [64, 68];
+const VIEWER_GIZMO_COMPACT_SCALE = 25;
+const VIEWER_AXIS_HEAD_RADIUS = 0.26;
+const VIEWER_AXIS_LABEL_BADGE_RADIUS = 0.18;
+const VIEWER_AXIS_LABEL_BADGE_COLOR = '#07111d';
+const VIEWER_AXIS_LABEL_FONT_SIZE = 0.24;
+const VIEWER_AXIS_LABEL_FONT_WEIGHT = 800;
+const VIEWER_AXIS_LABEL_COLOR = '#ffffff';
+const VIEWER_AXIS_LABEL_OUTLINE_COLOR = '#07111d';
+const VIEWER_AXIS_LABEL_OUTLINE_WIDTH = 0.028;
+const VIEWER_GIZMO_AXIS_LENGTH = 1.75;
+const VIEWER_GIZMO_LABEL_DISTANCE = 1.9;
+const VIEWER_VIEW_CUBE_SIZE = 1.2;
+const VIEWER_VIEW_CUBE_BODY_OPACITY = 1;
+const VIEWER_VIEW_CUBE_FACE_OPACITY = 0.62;
+const VIEWER_VIEW_CUBE_FACE_HOVER_OPACITY = 0.78;
+const VIEWER_VIEW_CUBE_EDGE_COLOR = '#8fb4d8';
+// Label plane height (the canvas pads around the glyphs), and the widest a
+// label may span across a face before it shrinks to fit.
+const VIEWER_VIEW_CUBE_FACE_LABEL_FONT_SIZE = 0.5;
+const VIEWER_VIEW_CUBE_FACE_LABEL_MAX_WIDTH = VIEWER_VIEW_CUBE_SIZE * 0.86;
+const VIEWER_VIEW_CUBE_CORNER_RADIUS = 0.082;
+const VIEWER_VIEW_CUBE_CORNER_HIT_RADIUS = 0.19;
+const VIEWER_VIEW_CUBE_FACE_VISIBILITY_THRESHOLD = 0;
+const VIEWER_ISOMETRIC_GIZMO_VIEW = 'iso';
+
+type ViewAxis = 'x' | 'y' | 'z';
+type ViewCubeCornerDirection = [number, number, number];
+type GizmoViewRequest = ViewAxis | 'iso' | { kind: 'corner'; direction: ViewCubeCornerDirection };
+type ViewCubeFaceLabel = 'Front' | 'Back' | 'Right' | 'Left' | 'Top' | 'Bottom';
+type GizmoViewTarget = '+x' | '+y' | '+z' | 'front' | 'right' | 'top' | 'iso';
+type ViewCubeFaceDirection = ViewCubeCornerDirection;
+
+function distanceToFitBoundingSphere(camera: THREE.Camera, radius: number, framing: ViewerFraming = UNADJUSTED_FRAMING): number {
+  if (!(camera instanceof THREE.PerspectiveCamera)) return radius * 4;
+
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const verticalDistance = radius / Math.sin(vFov / 2);
+  const horizontalDistance = radius / Math.sin(hFov / 2);
+
+  return Math.max(verticalDistance, horizontalDistance) * VIEWPORT_PADDING * framing.distanceScale;
+}
+
+function isCompactViewer(size: { width: number; height: number }): boolean {
+  return size.width < VIEWER_GIZMO_COMPACT_MAX_WIDTH || size.height < VIEWER_GIZMO_COMPACT_MAX_HEIGHT;
+}
+
+// Farthest the gizmo reaches from its anchor in any orientation, in gizmo
+// units: the axis caps and the origin button sit LABEL_DISTANCE·√3/2 from the
+// content centre, plus the cap's own radius.
+const VIEWER_GIZMO_REACH = (VIEWER_GIZMO_LABEL_DISTANCE / 2) * Math.sqrt(3) + VIEWER_AXIS_HEAD_RADIUS;
+
+/**
+ * How a fitted model sits in this viewport. Wide viewers keep the plain
+ * centred fit; compact ones nudge it down-left (and, on very small viewers,
+ * back) so it stays clear of the corner view cube.
+ */
+function viewerFraming(size: { width: number; height: number }, camera: THREE.Camera): ViewerFraming {
+  if (!(camera instanceof THREE.PerspectiveCamera) || !isCompactViewer(size)) return UNADJUSTED_FRAMING;
+  return compactViewerFraming(size, {
+    fovDeg: camera.fov,
+    padding: VIEWPORT_PADDING,
+    gizmo: {
+      marginX: VIEWER_GIZMO_COMPACT_MARGIN[0],
+      marginY: VIEWER_GIZMO_COMPACT_MARGIN[1],
+      radiusPx: VIEWER_GIZMO_REACH * VIEWER_GIZMO_COMPACT_SCALE,
+    },
+    gapPx: 8,
+    edgePx: 8,
+  });
+}
+
+function useViewerFraming(): ViewerFraming {
+  const camera = useThree((state) => state.camera);
+  const width = useThree((state) => state.size.width);
+  const height = useThree((state) => state.size.height);
+  return useMemo(() => viewerFraming({ width, height }, camera), [camera, width, height]);
+}
+
+/**
+ * Shift the projection so a model at the orbit target appears at the framed
+ * centre. Orbit, zoom and picking all stay centred on the target; only where
+ * it lands on screen moves. Wide viewers clear the offset.
+ */
+function ViewerFramingOffset({ framing }: { framing: ViewerFraming }) {
+  const camera = useThree((state) => state.camera);
+  const width = useThree((state) => state.size.width);
+  const height = useThree((state) => state.size.height);
+
+  useLayoutEffect(() => {
+    if (!(camera instanceof THREE.PerspectiveCamera)) return;
+    if (framing.offsetX === 0 && framing.offsetY === 0) {
+      if (camera.view?.enabled) camera.clearViewOffset();
+      return;
+    }
+    // The sub-view moves opposite to where the content should appear.
+    camera.setViewOffset(width, height, -framing.offsetX, -framing.offsetY, width, height);
+  }, [camera, width, height, framing.offsetX, framing.offsetY]);
+
+  useEffect(() => () => {
+    if (camera instanceof THREE.PerspectiveCamera && camera.view?.enabled) camera.clearViewOffset();
+  }, [camera]);
+
+  return null;
+}
+
+function defaultViewerBounds(): THREE.Box3 {
+  return new THREE.Box3().setFromCenterAndSize(
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(50, 50, 50),
+  );
+}
+
+function activeViewerBounds({
+  originalMesh,
+  sphereMode,
+  sphereRadius,
+  sampleShape,
+  resultMesh,
+  viewMode,
+}: {
+  originalMesh: TriangleMesh | null;
+  sphereMode: boolean;
+  sphereRadius: number;
+  sampleShape: SampleShape | null;
+  resultMesh: MarchingCubesResult | null;
+  viewMode: 'original' | 'lattice' | 'cross_section' | 'xray';
+}): THREE.Box3 {
+  if (viewMode !== 'original' && resultMesh) return resultBounds(resultMesh);
+  if (originalMesh) return meshBounds(originalMesh);
+  if (sphereMode && sampleShape) return meshBounds(generateSampleMesh(sampleShape, sphereRadius));
+  return defaultViewerBounds();
+}
+
+function viewerGizmoLayout() {
+  const cubeSize = VIEWER_VIEW_CUBE_SIZE;
+  const origin: [number, number, number] = [0, 0, 0];
+  const contentCenter: [number, number, number] = [
+    VIEWER_GIZMO_LABEL_DISTANCE / 2,
+    VIEWER_GIZMO_LABEL_DISTANCE / 2,
+    VIEWER_GIZMO_LABEL_DISTANCE / 2,
+  ];
+  return {
+    origin,
+    cubeMin: [0, 0, 0] as [number, number, number],
+    cubeMax: [cubeSize, cubeSize, cubeSize] as [number, number, number],
+    cubeCenter: [cubeSize / 2, cubeSize / 2, cubeSize / 2] as [number, number, number],
+    contentCenter,
+    contentOffset: contentCenter.map((value) => -value) as [number, number, number],
+    axisCapPositions: {
+      x: [VIEWER_GIZMO_LABEL_DISTANCE, 0, 0] as [number, number, number],
+      y: [0, VIEWER_GIZMO_LABEL_DISTANCE, 0] as [number, number, number],
+      z: [0, 0, VIEWER_GIZMO_LABEL_DISTANCE] as [number, number, number],
+    },
+  };
+}
+
+function gizmoViewTargetToRequest(target: GizmoViewTarget): GizmoViewRequest {
+  if (target === '+x' || target === 'right') return 'x';
+  if (target === '+y' || target === 'front') return 'y';
+  if (target === '+z' || target === 'top') return 'z';
+  return VIEWER_ISOMETRIC_GIZMO_VIEW;
+}
+
+function cameraViewForAxis(axis: ViewAxis): { direction: THREE.Vector3; up: THREE.Vector3 } {
+  if (axis === 'x') return { direction: new THREE.Vector3(1, 0, 0), up: WORLD_UP.clone() };
+  if (axis === 'y') return { direction: new THREE.Vector3(0, 1, 0), up: WORLD_UP.clone() };
+  return { direction: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(-1, 0, 0) };
+}
+
+function cameraViewForDirection(viewDirection: ViewCubeCornerDirection): { direction: THREE.Vector3; up: THREE.Vector3 } {
+  const direction = new THREE.Vector3(...viewDirection).normalize();
+  const projectedWorldUp = WORLD_UP.clone().projectOnPlane(direction);
+  const up = projectedWorldUp.lengthSq() > 1e-8
+    ? projectedWorldUp.normalize()
+    : new THREE.Vector3(-1, 0, 0);
+
+  return { direction, up };
+}
+
+function isCornerGizmoViewRequest(viewRequest: GizmoViewRequest): viewRequest is { kind: 'corner'; direction: ViewCubeCornerDirection } {
+  return typeof viewRequest === 'object' && viewRequest.kind === 'corner';
+}
+
+function cameraViewForRequest(viewRequest: GizmoViewRequest): { direction: THREE.Vector3; up: THREE.Vector3 } {
+  if (viewRequest === VIEWER_ISOMETRIC_GIZMO_VIEW) {
+    return { direction: ISO_VIEW_DIRECTION.clone(), up: ISO_VIEW_UP.clone() };
+  }
+  if (isCornerGizmoViewRequest(viewRequest)) {
+    return cameraViewForDirection(viewRequest.direction);
+  }
+  return cameraViewForAxis(viewRequest);
+}
+
+function vectorToTuple(vector: THREE.Vector3): ViewerVector3 {
+  return [vector.x, vector.y, vector.z];
+}
+
+function tupleToVector(tuple: ViewerVector3): THREE.Vector3 {
+  return new THREE.Vector3(tuple[0], tuple[1], tuple[2]);
+}
+
+function isFiniteTuple(tuple: ViewerVector3 | undefined): tuple is ViewerVector3 {
+  return Array.isArray(tuple) && tuple.length === 3 && tuple.every((value) => Number.isFinite(value));
+}
+
+function isValidViewerCameraState(cameraState: ViewerCameraState | null | undefined): cameraState is ViewerCameraState {
+  if (!cameraState) return false;
+  if (!isFiniteTuple(cameraState.position) || !isFiniteTuple(cameraState.target) || !isFiniteTuple(cameraState.up)) return false;
+  if (!Number.isFinite(cameraState.zoom) || cameraState.zoom <= 0) return false;
+
+  const position = tupleToVector(cameraState.position);
+  const target = tupleToVector(cameraState.target);
+  const up = tupleToVector(cameraState.up);
+  return position.distanceToSquared(target) > 1e-8 && up.lengthSq() > 1e-8;
+}
+
+function viewerCameraStateSignature(cameraState: ViewerCameraState | null | undefined) {
+  if (!isValidViewerCameraState(cameraState)) return '';
+  return [
+    ...cameraState.position,
+    ...cameraState.target,
+    ...cameraState.up,
+    cameraState.zoom,
+  ].map((value) => value.toFixed(4)).join(':');
+}
+
+function captureViewerCameraState(camera: THREE.Camera, controls: unknown): ViewerCameraState | null {
+  const orbitControls = controls as ResettableOrbitControls | null;
+  const target = orbitControls?.target ?? new THREE.Vector3(0, 0, 0);
+  const zoom = camera instanceof THREE.PerspectiveCamera || camera instanceof THREE.OrthographicCamera ? camera.zoom : 1;
+
+  const cameraState: ViewerCameraState = {
+    position: vectorToTuple(camera.position),
+    target: vectorToTuple(target),
+    up: vectorToTuple(camera.up),
+    zoom,
+    savedAt: Date.now(),
+  };
+
+  return isValidViewerCameraState(cameraState) ? cameraState : null;
+}
+
+function applyViewerCameraState(cameraState: ViewerCameraState, camera: THREE.Camera, controls: unknown) {
+  const resetSession = prepareOrbitControlsForCameraReset(controls);
+  const target = tupleToVector(cameraState.target);
+
+  camera.up.copy(tupleToVector(cameraState.up).normalize());
+  camera.position.copy(tupleToVector(cameraState.position));
+  camera.lookAt(target);
+  camera.updateMatrixWorld();
+
+  if (camera instanceof THREE.PerspectiveCamera || camera instanceof THREE.OrthographicCamera) {
+    camera.zoom = cameraState.zoom;
+    camera.updateProjectionMatrix();
+  }
+
+  return finishOrbitControlsAfterCameraReset(resetSession, target);
+}
+
+function GizmoCameraReset({ view, signal, framing }: { view: GizmoViewRequest | null; signal: number; framing: ViewerFraming }) {
+  const { camera, controls } = useThree();
+  // Read at reset time only: a resize must not replay the last view request.
+  const framingRef = useRef(framing);
+  useEffect(() => {
+    framingRef.current = framing;
+  }, [framing]);
+  const store = useStore(useShallow((s) => ({
+    originalMesh: s.originalMesh,
+    sphereMode: s.sphereMode,
+    sphereRadius: s.sphereRadius,
+    sampleShape: s.sampleShape,
+    resultMesh: s.resultMesh,
+    viewMode: s.viewMode,
+    setViewerCameraState: s.setViewerCameraState,
+  })));
+  const setViewerCameraState = store.setViewerCameraState;
+
+  useEffect(() => {
+    if (!view) return;
+
+    const resetSession = prepareOrbitControlsForCameraReset(controls);
+    const bounds = activeViewerBounds({
+      originalMesh: store.originalMesh,
+      sphereMode: store.sphereMode,
+      sphereRadius: store.sphereRadius,
+      sampleShape: store.sampleShape,
+      resultMesh: store.resultMesh,
+      viewMode: store.viewMode,
+    });
+    const center = bounds.getCenter(new THREE.Vector3());
+    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const radius = Math.max(sphere.radius, 1);
+    const distance = distanceToFitBoundingSphere(camera, radius, framingRef.current);
+    const cameraView = cameraViewForRequest(view);
+
+    camera.up.copy(cameraView.up);
+    camera.position.copy(center).add(cameraView.direction.clone().multiplyScalar(distance));
+    camera.lookAt(center);
+    camera.updateMatrixWorld();
+    if (camera instanceof THREE.PerspectiveCamera || camera instanceof THREE.OrthographicCamera) camera.updateProjectionMatrix();
+
+    const cleanupControls = finishOrbitControlsAfterCameraReset(resetSession, center);
+    if (typeof window === 'undefined') return cleanupControls;
+
+    const frameId = window.requestAnimationFrame(() => {
+      const cameraState = captureViewerCameraState(camera, controls);
+      if (cameraState) setViewerCameraState(cameraState);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      cleanupControls?.();
+    };
+  }, [
+    view,
+    signal,
+    camera,
+    controls,
+    store.originalMesh,
+    store.sphereMode,
+    store.sphereRadius,
+    store.sampleShape,
+    store.resultMesh,
+    store.viewMode,
+    setViewerCameraState,
+  ]);
+
+  return null;
+}
+
+function CleanAxisGizmo({ onSelectView, scale }: { onSelectView: (view: GizmoViewRequest) => void; scale: number }) {
+  const layout = viewerGizmoLayout();
+
+  return (
+    <group scale={scale}>
+      <group position={layout.contentOffset}>
+        <PositiveOctantViewCube onSelectView={onSelectView} />
+        {GIZMO_AXES.map((axis) => (
+          <GizmoAxis key={axis.label} {...axis} onSelectView={onSelectView} />
+        ))}
+        <IsoOriginButton onSelectView={onSelectView} />
+      </group>
+    </group>
+  );
+}
+
+const GIZMO_AXES: Array<{ label: 'X' | 'Y' | 'Z'; color: string; target: GizmoViewTarget; direction: [number, number, number] }> = [
+  { label: 'X', color: '#ff4b7d', target: '+x', direction: [1, 0, 0] },
+  { label: 'Y', color: '#2ddc94', target: '+y', direction: [0, 1, 0] },
+  { label: 'Z', color: '#4da3ff', target: '+z', direction: [0, 0, 1] },
+];
+
+function GizmoAxis({
+  label,
+  color,
+  target,
+  direction,
+  onSelectView,
+}: {
+  label: 'X' | 'Y' | 'Z';
+  color: string;
+  target: GizmoViewTarget;
+  direction: [number, number, number];
+  onSelectView: (view: GizmoViewRequest) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const origin = viewerGizmoLayout().origin;
+  const lineEnd = direction.map((value) => value * VIEWER_GIZMO_AXIS_LENGTH) as [number, number, number];
+  const capPosition = direction.map((value) => value * VIEWER_GIZMO_LABEL_DISTANCE) as [number, number, number];
+
+  return (
+    <group>
+      <Line points={[origin, lineEnd]} color={color} lineWidth={hovered ? 4 : 3} transparent opacity={hovered ? 1 : 0.85} depthTest={false} />
+      <AxisCap
+        label={label}
+        color={color}
+        position={capPosition}
+        target={target}
+        hovered={hovered}
+        onHoverChange={setHovered}
+        onSelectView={onSelectView}
+      />
+    </group>
+  );
+}
+
+function AxisCap({
+  label,
+  color,
+  position,
+  target,
+  hovered,
+  onHoverChange,
+  onSelectView,
+}: {
+  label: 'X' | 'Y' | 'Z';
+  color: string;
+  position: [number, number, number];
+  target: GizmoViewTarget;
+  hovered: boolean;
+  onHoverChange: (hovered: boolean) => void;
+  onSelectView: (view: GizmoViewRequest) => void;
+}) {
+  const title = `View +${label}`;
+
+  return (
+    <Billboard
+      name={title}
+      position={position}
+      scale={hovered ? 1.08 : 1}
+      userData={{ title, ariaLabel: title }}
+      onPointerDown={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+      }}
+      onClick={(event: ThreeEvent<MouseEvent>) => {
+        event.stopPropagation();
+        onSelectView(gizmoViewTargetToRequest(target));
+      }}
+      onPointerOver={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        onHoverChange(true);
+      }}
+      onPointerOut={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        onHoverChange(false);
+      }}
+    >
+      {hovered && (
+        <mesh position={[0, 0, -0.002]}>
+          <ringGeometry args={[VIEWER_AXIS_HEAD_RADIUS * 1.02, VIEWER_AXIS_HEAD_RADIUS * 1.18, 40]} />
+          <meshBasicMaterial color="#f8fbff" depthTest={false} transparent opacity={0.38} toneMapped={false} />
+        </mesh>
+      )}
+      <mesh>
+        <ringGeometry args={[VIEWER_AXIS_LABEL_BADGE_RADIUS, VIEWER_AXIS_HEAD_RADIUS, 40]} />
+        <meshBasicMaterial color={color} depthTest={false} toneMapped={false} />
+      </mesh>
+      <mesh position={[0, 0, 0.004]}>
+        <circleGeometry args={[VIEWER_AXIS_LABEL_BADGE_RADIUS, 36]} />
+        <meshBasicMaterial color={VIEWER_AXIS_LABEL_BADGE_COLOR} depthTest={false} toneMapped={false} />
+      </mesh>
+      <GizmoTextLabel
+        color={VIEWER_AXIS_LABEL_COLOR}
+        fontSize={VIEWER_AXIS_LABEL_FONT_SIZE}
+        fontWeight={VIEWER_AXIS_LABEL_FONT_WEIGHT}
+        outlineColor={VIEWER_AXIS_LABEL_OUTLINE_COLOR}
+        outlineWidth={VIEWER_AXIS_LABEL_OUTLINE_WIDTH}
+        position={[0, 0, 0.01]}
+      >
+        {label}
+      </GizmoTextLabel>
+      <GizmoTextLabel
+        color="#d7e3ee"
+        fontSize={0.105}
+        outlineColor={VIEWER_AXIS_LABEL_OUTLINE_COLOR}
+        outlineWidth={0.01}
+        position={[0, -0.095, 0.011]}
+      >
+        +
+      </GizmoTextLabel>
+    </Billboard>
+  );
+}
+
+function PositiveOctantViewCube({ onSelectView }: { onSelectView: (view: GizmoViewRequest) => void }) {
+  const cubeSize = VIEWER_VIEW_CUBE_SIZE;
+  const half = VIEWER_VIEW_CUBE_SIZE / 2;
+  const faces = useMemo(() => getViewCubeFaceDescriptors(), []);
+  const corners = useMemo(() => getViewCubeCornerDescriptors(), []);
+
+  return (
+    <group name="Positive-octant triad view cube">
+      <mesh position={[half, half, half]} renderOrder={1}>
+        <boxGeometry args={[cubeSize, cubeSize, cubeSize]} />
+        <meshBasicMaterial color="#1d2b3d" depthTest transparent={false} opacity={VIEWER_VIEW_CUBE_BODY_OPACITY} depthWrite toneMapped={false} />
+      </mesh>
+      <ViewCubeEdges />
+      {faces.map((face) => (
+        <ViewCubeFace key={face.label} {...face} onSelectView={onSelectView} />
+      ))}
+      {corners.map((corner) => (
+        <ViewCubeCorner key={corner.title} {...corner} onSelectView={onSelectView} />
+      ))}
+    </group>
+  );
+}
+
+interface ViewCubeFaceDescriptor {
+  label: ViewCubeFaceLabel;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  normal: [number, number, number];
+  direction: ViewCubeFaceDirection;
+}
+
+function getViewCubeFaceDescriptors(): ViewCubeFaceDescriptor[] {
+  const cubeSize = VIEWER_VIEW_CUBE_SIZE;
+  const faceOffset = 0.006;
+  const half = VIEWER_VIEW_CUBE_SIZE / 2;
+  return [
+    { label: 'Front', position: [half, cubeSize + faceOffset, half], rotation: [-Math.PI / 2, 0, -Math.PI], normal: [0, 1, 0], direction: [0, 1, 0] },
+    { label: 'Back', position: [half, -faceOffset, half], rotation: [Math.PI / 2, 0, 0], normal: [0, -1, 0], direction: [0, -1, 0] },
+    { label: 'Left', position: [cubeSize + faceOffset, half, half], rotation: [Math.PI / 2, Math.PI / 2, 0], normal: [1, 0, 0], direction: [1, 0, 0] },
+    { label: 'Right', position: [-faceOffset, half, half], rotation: [Math.PI / 2, -Math.PI / 2, 0], normal: [-1, 0, 0], direction: [-1, 0, 0] },
+    { label: 'Top', position: [half, half, cubeSize + faceOffset], rotation: [0, 0, Math.PI / 2], normal: [0, 0, 1], direction: [0, 0, 1] },
+    { label: 'Bottom', position: [half, half, -faceOffset], rotation: [-Math.PI, 0, -Math.PI / 2], normal: [0, 0, -1], direction: [0, 0, -1] },
+  ];
+}
+
+interface ViewCubeCornerDescriptor {
+  title: string;
+  position: [number, number, number];
+  direction: ViewCubeCornerDirection;
+}
+
+function getViewCubeCornerDescriptors(): ViewCubeCornerDescriptor[] {
+  const cubeSize = VIEWER_VIEW_CUBE_SIZE;
+  const signs = [-1, 1] as const;
+  const axisTitle = (axis: 'X' | 'Y' | 'Z', sign: -1 | 1) => `${sign > 0 ? '+' : '-'}${axis}`;
+  return signs.flatMap((x) =>
+    signs.flatMap((y) =>
+      signs.map((z) => ({
+        title: `View ${axisTitle('X', x)} ${axisTitle('Y', y)} ${axisTitle('Z', z)}`,
+        position: [x > 0 ? cubeSize : 0, y > 0 ? cubeSize : 0, z > 0 ? cubeSize : 0] as [number, number, number],
+        direction: [x, y, z] as ViewCubeCornerDirection,
+      }))
+    )
+  );
+}
+
+function ViewCubeEdges({ active = false }: { active?: boolean }) {
+  const cubeSize = VIEWER_VIEW_CUBE_SIZE;
+  const edgeInset = 0.004;
+  const min = -edgeInset;
+  const max = cubeSize + edgeInset;
+  const edgeSegments: Array<[[number, number, number], [number, number, number]]> = [
+    [[min, min, min], [max, min, min]],
+    [[min, max, min], [max, max, min]],
+    [[min, min, max], [max, min, max]],
+    [[min, max, max], [max, max, max]],
+    [[min, min, min], [min, max, min]],
+    [[max, min, min], [max, max, min]],
+    [[min, min, max], [min, max, max]],
+    [[max, min, max], [max, max, max]],
+    [[min, min, min], [min, min, max]],
+    [[max, min, min], [max, min, max]],
+    [[min, max, min], [min, max, max]],
+    [[max, max, min], [max, max, max]],
+  ];
+
+  return (
+    <group renderOrder={2}>
+      {edgeSegments.map((segment, index) => (
+        <Line
+          key={index}
+          points={segment}
+          color={active ? '#d9ecff' : VIEWER_VIEW_CUBE_EDGE_COLOR}
+          lineWidth={active ? 2 : 1}
+          transparent
+          opacity={active ? 0.82 : 0.56}
+          depthTest
+        />
+      ))}
+    </group>
+  );
+}
+
+function ViewCubeFace({
+  label,
+  position,
+  rotation,
+  normal,
+  direction,
+  onSelectView,
+}: ViewCubeFaceDescriptor & {
+  onSelectView: (view: GizmoViewRequest) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const { camera } = useThree();
+  const faceRef = useRef<THREE.Group | null>(null);
+  const labelRef = useRef<THREE.Group | null>(null);
+  const localNormal = useMemo(() => new THREE.Vector3(...normal), [normal]);
+  const faceNormalWorldRef = useRef(new THREE.Vector3());
+  const toCameraWorldRef = useRef(new THREE.Vector3());
+  const normalMatrixRef = useRef(new THREE.Matrix3());
+  const title = `${label} view`;
+  useFrame(() => {
+    const labelObject = labelRef.current;
+    const cubeRootObject = faceRef.current?.parent;
+    if (!labelObject || !cubeRootObject) return;
+    const faceNormalWorld = faceNormalWorldRef.current.copy(localNormal).applyNormalMatrix(normalMatrixRef.current.getNormalMatrix(cubeRootObject.matrixWorld)).normalize();
+    const toCameraWorld = camera.getWorldDirection(toCameraWorldRef.current).negate().normalize();
+    labelObject.visible = shouldShowViewCubeFaceLabel(faceNormalWorld, toCameraWorld);
+  });
+
+  return (
+    <group
+      ref={faceRef}
+      name={title}
+      position={position}
+      rotation={rotation}
+      userData={{ title, ariaLabel: title }}
+      onPointerDown={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+      }}
+      onClick={(event: ThreeEvent<MouseEvent>) => {
+        event.stopPropagation();
+        onSelectView({ kind: 'corner', direction });
+      }}
+      onPointerOver={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        setHovered(true);
+      }}
+      onPointerOut={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        setHovered(false);
+      }}
+    >
+      <mesh renderOrder={3}>
+        <planeGeometry args={[VIEWER_VIEW_CUBE_SIZE * 0.82, VIEWER_VIEW_CUBE_SIZE * 0.82]} />
+        <meshBasicMaterial color={hovered ? '#6da4c9' : '#31516b'} depthTest transparent opacity={hovered ? VIEWER_VIEW_CUBE_FACE_HOVER_OPACITY : VIEWER_VIEW_CUBE_FACE_OPACITY} depthWrite={false} toneMapped={false} />
+      </mesh>
+      <group ref={labelRef}>
+        <ViewCubeFaceText text={label} color={hovered ? '#ffffff' : '#e4eef8'} opacity={hovered ? 1 : 0.95} />
+      </group>
+    </group>
+  );
+}
+
+function ViewCubeCorner({
+  title,
+  position,
+  direction,
+  onSelectView,
+}: ViewCubeCornerDescriptor & {
+  onSelectView: (view: GizmoViewRequest) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <Billboard
+      name={title}
+      position={position}
+      scale={hovered ? 1.22 : 1}
+      userData={{ title, ariaLabel: title }}
+      onPointerDown={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+      }}
+      onClick={(event: ThreeEvent<MouseEvent>) => {
+        event.stopPropagation();
+        onSelectView({ kind: 'corner', direction });
+      }}
+      onPointerOver={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        setHovered(true);
+      }}
+      onPointerOut={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        setHovered(false);
+      }}
+    >
+      <mesh renderOrder={3}>
+        <sphereGeometry args={[VIEWER_VIEW_CUBE_CORNER_HIT_RADIUS, 18, 18]} />
+        <meshBasicMaterial color="#ffffff" depthTest={false} transparent opacity={0} toneMapped={false} />
+      </mesh>
+      <mesh renderOrder={5}>
+        <sphereGeometry args={[VIEWER_VIEW_CUBE_CORNER_RADIUS, 18, 18]} />
+        <meshBasicMaterial color={hovered ? '#f8fbff' : '#a9c9e8'} depthTest={false} transparent opacity={hovered ? 0.96 : 0.78} toneMapped={false} />
+      </mesh>
+      {hovered && (
+        <mesh renderOrder={4}>
+          <sphereGeometry args={[VIEWER_VIEW_CUBE_CORNER_RADIUS * 1.7, 18, 18]} />
+          <meshBasicMaterial color="#f8fbff" depthTest={false} transparent opacity={0.22} toneMapped={false} />
+        </mesh>
+      )}
+    </Billboard>
+  );
+}
+
+function IsoOriginButton({ onSelectView }: { onSelectView: (view: GizmoViewRequest) => void }) {
+  const [hovered, setHovered] = useState(false);
+  const half = VIEWER_VIEW_CUBE_SIZE / 2;
+
+  return (
+    <Billboard
+      name="Isometric view"
+      position={[half, half, half]}
+      userData={{ title: 'Isometric view', ariaLabel: 'Isometric view' }}
+      onPointerDown={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+      }}
+      onClick={(event: ThreeEvent<MouseEvent>) => {
+        event.stopPropagation();
+        onSelectView(gizmoViewTargetToRequest('iso'));
+      }}
+      onPointerOver={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        setHovered(true);
+      }}
+      onPointerOut={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        setHovered(false);
+      }}
+    >
+      {hovered && (
+        <mesh>
+          <ringGeometry args={[0.075, 0.105, 28]} />
+          <meshBasicMaterial color="#f8fbff" depthTest={false} transparent opacity={0.42} toneMapped={false} />
+        </mesh>
+      )}
+      <mesh>
+        <sphereGeometry args={[0.065, 18, 18]} />
+        <meshBasicMaterial color="#d9e8f6" depthTest={false} toneMapped={false} />
+      </mesh>
+      {hovered && (
+        <GizmoTextLabel color="#f8fbff" fontSize={0.095} position={[0, -0.16, 0.01]}>
+          Iso
+        </GizmoTextLabel>
+      )}
+    </Billboard>
+  );
+}
+
+interface LabelTextureOptions {
+  text: string;
+  color: string;
+  fontSize: number;
+  fontWeight: number;
+  outlineColor: string;
+  outlineWidth: number;
+}
+
+const LABEL_FONT_PIXELS = 88;
+const LABEL_HORIZONTAL_PADDING = 24;
+const LABEL_CANVAS_HEIGHT = 128;
+
+/** Text drawn into a canvas texture; aspect is the texture's width over height. */
+function useLabelTexture({ text, color, fontSize, fontWeight, outlineColor, outlineWidth }: LabelTextureOptions) {
+  const texture = useMemo(() => {
+    const canvas = document.createElement('canvas');
+    const font = `${fontWeight} ${LABEL_FONT_PIXELS}px system-ui, -apple-system, BlinkMacSystemFont, sans-serif`;
+    const measuringContext = canvas.getContext('2d');
+    if (measuringContext) measuringContext.font = font;
+    const measuredWidth = measuringContext?.measureText(text).width ?? LABEL_FONT_PIXELS;
+    canvas.width = Math.max(128, Math.ceil(measuredWidth + LABEL_HORIZONTAL_PADDING * 2));
+    canvas.height = LABEL_CANVAS_HEIGHT;
+    const context = canvas.getContext('2d');
+    if (context) {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.font = font;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.lineJoin = 'round';
+      context.strokeStyle = outlineColor;
+      context.lineWidth = Math.max(2, (outlineWidth / Math.max(fontSize, 0.001)) * LABEL_FONT_PIXELS);
+      context.strokeText(text, canvas.width / 2, canvas.height / 2);
+      context.fillStyle = color;
+      context.fillText(text, canvas.width / 2, canvas.height / 2);
+    }
+    const nextTexture = new THREE.CanvasTexture(canvas);
+    nextTexture.colorSpace = THREE.SRGBColorSpace;
+    nextTexture.minFilter = THREE.LinearFilter;
+    return nextTexture;
+  }, [text, color, fontSize, fontWeight, outlineColor, outlineWidth]);
+  useEffect(() => () => texture.dispose(), [texture]);
+  return { texture, aspect: texture.image.width / texture.image.height };
+}
+
+function GizmoTextLabel({
+  children,
+  color,
+  fontSize,
+  fontWeight = 700,
+  depthTest = false,
+  opacity = 1,
+  outlineColor = '#07111d',
+  outlineWidth = 0.014,
+  position = [0, 0, 0.01],
+}: {
+  children: string;
+  color: string;
+  fontSize: number;
+  fontWeight?: number;
+  depthTest?: boolean;
+  opacity?: number;
+  outlineColor?: string;
+  outlineWidth?: number;
+  position?: [number, number, number];
+}) {
+  const { texture, aspect } = useLabelTexture({ text: children, color, fontSize, fontWeight, outlineColor, outlineWidth });
+
+  return (
+    <sprite
+      frustumCulled={false}
+      position={position}
+      renderOrder={5}
+      scale={[fontSize * aspect, fontSize, 1]}
+    >
+      <spriteMaterial
+        map={texture}
+        depthTest={depthTest}
+        depthWrite={false}
+        opacity={opacity}
+        toneMapped={false}
+        transparent
+      />
+    </sprite>
+  );
+}
+
+const noRaycast = () => {};
+
+/**
+ * A face label printed flat on its view-cube face. A camera-facing sprite
+ * poked into the opaque cube body whenever the face was oblique, and the depth
+ * test then cut letters off ("Let", "ront"); lying in the face plane it cannot.
+ * Long words shrink to fit inside the face.
+ */
+function ViewCubeFaceText({ text, color, opacity }: { text: string; color: string; opacity: number }) {
+  const { texture, aspect } = useLabelTexture({
+    text,
+    color,
+    fontSize: VIEWER_VIEW_CUBE_FACE_LABEL_FONT_SIZE,
+    fontWeight: 800,
+    outlineColor: '#07111d',
+    outlineWidth: 0.02,
+  });
+  const height = Math.min(
+    VIEWER_VIEW_CUBE_FACE_LABEL_FONT_SIZE,
+    VIEWER_VIEW_CUBE_FACE_LABEL_MAX_WIDTH / aspect,
+  );
+
+  return (
+    <mesh position={[0, 0, 0.004]} renderOrder={4} scale={[height * aspect, height, 1]} raycast={noRaycast}>
+      <planeGeometry args={[1, 1]} />
+      <meshBasicMaterial
+        map={texture}
+        transparent
+        opacity={opacity}
+        depthTest
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </mesh>
+  );
+}
+
+// Scratch vectors for the per-frame face visibility test (six faces per frame).
+const viewCubeFaceNormalScratch = new THREE.Vector3();
+const viewCubeToCameraScratch = new THREE.Vector3();
+
+function shouldShowViewCubeFaceLabel(
+  faceNormalWorld: THREE.Vector3,
+  toCameraWorld: THREE.Vector3,
+  threshold = VIEWER_VIEW_CUBE_FACE_VISIBILITY_THRESHOLD
+) {
+  const normal = viewCubeFaceNormalScratch.copy(faceNormalWorld).normalize();
+  const toCamera = viewCubeToCameraScratch.copy(toCameraWorld).normalize();
+  return normal.dot(toCamera) > threshold;
+}
+
+type ViewportApi = { camera: THREE.Camera; controls: ResettableOrbitControls | null };
+
+/**
+ * Lets keyboard users orbit, zoom, and pan the camera — the pointer-only
+ * OrbitControls otherwise excludes them (WCAG 2.1.1). Orbit math respects the
+ * scene's Z-up convention. Returns true when the key was handled.
+ */
+function applyViewportKeyboardAction(key: string, shiftKey: boolean, api: ViewportApi | null): boolean {
+  if (!api) return false;
+  const { camera, controls } = api;
+  const target = controls?.target;
+  if (!target) return false;
+
+  const ROTATE_STEP = 0.15;
+  const ZOOM_FACTOR = 1.1;
+  const MIN_DISTANCE = 0.5;
+  const MAX_DISTANCE = 100000;
+
+  const up = camera.up.clone().normalize();
+  const offset = camera.position.clone().sub(target);
+  const right = new THREE.Vector3().crossVectors(offset, up);
+  if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+  right.normalize();
+  const panStep = Math.max(offset.length() * 0.05, MIN_DISTANCE);
+
+  const applyPan = (delta: THREE.Vector3) => {
+    target.add(delta);
+    camera.position.add(delta);
+  };
+
+  const applyPitch = (angle: number) => {
+    const rotated = offset.clone().applyAxisAngle(right, angle);
+    // Avoid flipping past the poles where orbit becomes unstable.
+    if (Math.abs(rotated.clone().normalize().dot(up)) < 0.985) offset.copy(rotated);
+  };
+
+  let handled = true;
+  let panned = false;
+
+  switch (key) {
+    case 'ArrowLeft':
+      if (shiftKey) { panned = true; applyPan(right.clone().multiplyScalar(-panStep)); }
+      else offset.applyAxisAngle(up, ROTATE_STEP);
+      break;
+    case 'ArrowRight':
+      if (shiftKey) { panned = true; applyPan(right.clone().multiplyScalar(panStep)); }
+      else offset.applyAxisAngle(up, -ROTATE_STEP);
+      break;
+    case 'ArrowUp':
+      if (shiftKey) { panned = true; applyPan(up.clone().multiplyScalar(panStep)); }
+      else applyPitch(ROTATE_STEP);
+      break;
+    case 'ArrowDown':
+      if (shiftKey) { panned = true; applyPan(up.clone().multiplyScalar(-panStep)); }
+      else applyPitch(-ROTATE_STEP);
+      break;
+    case '+':
+    case '=':
+      offset.multiplyScalar(1 / ZOOM_FACTOR);
+      break;
+    case '-':
+    case '_':
+      offset.multiplyScalar(ZOOM_FACTOR);
+      break;
+    default:
+      handled = false;
+  }
+
+  if (!handled) return false;
+
+  if (!panned) {
+    const distance = THREE.MathUtils.clamp(offset.length(), MIN_DISTANCE, MAX_DISTANCE);
+    offset.setLength(distance);
+    camera.position.copy(target).add(offset);
+  }
+  camera.lookAt(target);
+  camera.updateMatrixWorld();
+  controls?.update?.();
+  return true;
+}
+
+
+/**
+ * The view cube, sized and placed for the viewport (smaller and top-right on
+ * phones). Reports the compact state so the DOM overlays can make room.
+ */
+function ResponsiveViewGizmo({
+  onSelectView,
+  onCompactChange,
+}: {
+  onSelectView: (view: GizmoViewRequest) => void;
+  onCompactChange: (compact: boolean) => void;
+}) {
+  const size = useThree((state) => state.size);
+  const compact = isCompactViewer(size);
+  useEffect(() => onCompactChange(compact), [compact, onCompactChange]);
+  return (
+    <GizmoHelper
+      alignment={compact ? VIEWER_GIZMO_COMPACT_ALIGNMENT : VIEWER_GIZMO_ALIGNMENT}
+      margin={compact ? VIEWER_GIZMO_COMPACT_MARGIN : VIEWER_GIZMO_MARGIN}
+    >
+      <CleanAxisGizmo onSelectView={onSelectView} scale={compact ? VIEWER_GIZMO_COMPACT_SCALE : VIEWER_GIZMO_SCALE} />
+    </GizmoHelper>
+  );
+}
+
+// Camera-space light directions (x right, y up, z toward the viewer). Lights
+// follow the camera, so curvature reads from every orbit angle the way a
+// studio key/fill/rim rig would, without shadows or extra passes.
+const KEY_LIGHT_DIRECTION = new THREE.Vector3(-0.55, 0.75, 0.7).normalize();
+const FILL_LIGHT_DIRECTION = new THREE.Vector3(0.85, -0.15, 0.5).normalize();
+const RIM_LIGHT_DIRECTION = new THREE.Vector3(0.25, 0.55, -1).normalize();
+
+function ViewerLighting() {
+  const camera = useThree((state) => state.camera);
+  const keyRef = useRef<THREE.DirectionalLight>(null);
+  const fillRef = useRef<THREE.DirectionalLight>(null);
+  const rimRef = useRef<THREE.DirectionalLight>(null);
+
+  // Directional lights shine from position toward their target (the origin by
+  // default); only the direction matters, so a unit offset is enough.
+  useFrame(() => {
+    const rig: Array<[THREE.DirectionalLight | null, THREE.Vector3]> = [
+      [keyRef.current, KEY_LIGHT_DIRECTION],
+      [fillRef.current, FILL_LIGHT_DIRECTION],
+      [rimRef.current, RIM_LIGHT_DIRECTION],
+    ];
+    for (const [light, direction] of rig) {
+      if (light) light.position.copy(direction).applyQuaternion(camera.quaternion);
+    }
+  });
+
+  return (
+    <>
+      {/* Sky above, ground below in the scene's Z-up frame. */}
+      <hemisphereLight args={['#dfe9f5', '#2a2622', 0.85]} position={[0, 0, 1]} />
+      <directionalLight ref={keyRef} intensity={2.1} />
+      <directionalLight ref={fillRef} intensity={0.55} />
+      <directionalLight ref={rimRef} intensity={1.1} />
+    </>
+  );
+}
+
+/**
+ * Keep the drawing buffer in step with the viewer's box. R3F measures its own
+ * wrapper, which has lagged a layout behind when the shell's grid row changed
+ * (log drawer) or the Canvas remounted (leaving multiview), leaving a squashed
+ * or 300×150 render until the next window resize.
+ */
+function ViewportResizeSync() {
+  const { gl, setSize } = useThree();
+
+  useEffect(() => {
+    const host = gl.domElement.parentElement?.parentElement ?? gl.domElement.parentElement;
+    if (!host || typeof ResizeObserver === 'undefined') return;
+
+    const sync = () => {
+      const rect = host.getBoundingClientRect();
+      const width = Math.round(rect.width);
+      const height = Math.round(rect.height);
+      if (width > 0 && height > 0) setSize(width, height);
+    };
+
+    const observer = new ResizeObserver(sync);
+    observer.observe(host);
+    sync();
+    return () => observer.disconnect();
+  }, [gl, setSize]);
+
+  return null;
+}
+
+function AutoFit({ framing }: { framing: ViewerFraming }) {
+  const { camera, controls, size: canvasSize } = useThree();
+  const store = useStore(useShallow((s) => ({
+    originalMesh: s.originalMesh,
+    sphereMode: s.sphereMode,
+    sphereRadius: s.sphereRadius,
+    sampleShape: s.sampleShape,
+    viewportResetSignal: s.viewportResetSignal,
+    viewerCameraState: s.viewerCameraState,
+  })));
+
+  useEffect(() => {
+    if (isValidViewerCameraState(store.viewerCameraState)) return;
+
+    const resetSession = prepareOrbitControlsForCameraReset(controls);
+    const mesh = store.originalMesh;
+    let bounds = new THREE.Box3().setFromCenterAndSize(
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(50, 50, 50),
+    );
+
+    if (mesh) {
+      bounds = meshBounds(mesh);
+    } else if (store.sphereMode && store.sampleShape) {
+      bounds = meshBounds(generateSampleMesh(store.sampleShape, store.sphereRadius));
+    }
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const radius = Math.max(sphere.radius, 1);
+    const distance = distanceToFitBoundingSphere(camera, radius, framing);
+
+    camera.up.copy(ISO_VIEW_UP);
+    camera.position.copy(center).add(ISO_VIEW_DIRECTION.clone().multiplyScalar(distance));
+    camera.lookAt(center);
+    camera.updateProjectionMatrix();
+
+    return finishOrbitControlsAfterCameraReset(resetSession, center);
+  }, [
+    store.originalMesh,
+    store.sphereMode,
+    store.sphereRadius,
+    store.sampleShape,
+    store.viewportResetSignal,
+    store.viewerCameraState,
+    camera,
+    controls,
+    canvasSize.width,
+    canvasSize.height,
+    framing,
+  ]);
+
+  return null;
+}
+
+/** Fitting and view-cube resets, framed for the viewport (see viewerFraming). */
+function FramedCamera({ view, signal }: { view: GizmoViewRequest | null; signal: number }) {
+  const framing = useViewerFraming();
+  return (
+    <>
+      <ViewerFramingOffset framing={framing} />
+      <AutoFit framing={framing} />
+      <GizmoCameraReset view={view} signal={signal} framing={framing} />
+    </>
+  );
+}
+
+function ViewerCameraSession() {
+  const { camera, controls } = useThree();
+  const {
+    viewerCameraState,
+    setViewerCameraState,
+    originalMesh,
+    sphereMode,
+    sphereRadius,
+    sampleShape,
+    resultMesh,
+    viewMode,
+    viewportResetSignal,
+  } = useStore(useShallow((s) => ({
+    viewerCameraState: s.viewerCameraState,
+    setViewerCameraState: s.setViewerCameraState,
+    originalMesh: s.originalMesh,
+    sphereMode: s.sphereMode,
+    sphereRadius: s.sphereRadius,
+    sampleShape: s.sampleShape,
+    resultMesh: s.resultMesh,
+    viewMode: s.viewMode,
+    viewportResetSignal: s.viewportResetSignal,
+  })));
+  const restoredSignatureRef = useRef<string>('');
+  const applyingPersistedCameraRef = useRef(false);
+  const saveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!isValidViewerCameraState(viewerCameraState)) return;
+
+    const signature = viewerCameraStateSignature(viewerCameraState);
+    if (signature === restoredSignatureRef.current) return;
+
+    const bounds = activeViewerBounds({
+      originalMesh,
+      sphereMode,
+      sphereRadius,
+      sampleShape,
+      resultMesh,
+      viewMode,
+    });
+    if (bounds.isEmpty()) return;
+
+    applyingPersistedCameraRef.current = true;
+    restoredSignatureRef.current = signature;
+    const cleanup = applyViewerCameraState(viewerCameraState, camera, controls);
+
+    if (typeof window === 'undefined') {
+      applyingPersistedCameraRef.current = false;
+      return cleanup;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      applyingPersistedCameraRef.current = false;
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      applyingPersistedCameraRef.current = false;
+      cleanup?.();
+    };
+  }, [
+    viewerCameraState,
+    camera,
+    controls,
+    originalMesh,
+    sphereMode,
+    sphereRadius,
+    sampleShape,
+    resultMesh,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    const orbitControls = controls as ResettableOrbitControls | null;
+    if (!orbitControls?.addEventListener || !orbitControls.removeEventListener) return undefined;
+
+    const saveCameraState = () => {
+      if (applyingPersistedCameraRef.current || typeof window === 'undefined') return;
+
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(() => {
+        saveTimerRef.current = null;
+        if (applyingPersistedCameraRef.current) return;
+
+        const nextCameraState = captureViewerCameraState(camera, controls);
+        if (!nextCameraState) return;
+
+        const nextSignature = viewerCameraStateSignature(nextCameraState);
+        restoredSignatureRef.current = nextSignature;
+        setViewerCameraState(nextCameraState);
+      }, 200);
+    };
+
+    orbitControls.addEventListener('change', saveCameraState);
+    return () => {
+      orbitControls.removeEventListener?.('change', saveCameraState);
+      if (saveTimerRef.current && typeof window !== 'undefined') {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [camera, controls, setViewerCameraState, viewportResetSignal]);
+
+  return null;
+}
+
+export function Viewer3D() {
+  const {
+    originalMesh, sphereMode, sphereRadius, sampleShape, viewMode, clipPlane,
+    keepOutTris, keepInTris, selectionMode, resultMesh, brushRadius,
+    paintTriangles, beginSelectionStroke, endSelectionStroke, viewerBackground, demoModeActive,
+    demoRunId, params, generationSeed, demoParamsByType, setLatticeType, viewportResetSignal,
+    validation, showThinFeatures, pinnedRun, showPinnedRun, showBuildPlateGrid, resultSnapshot, setViewMode,
+  } = useStore(useShallow((s) => ({
+    originalMesh: s.originalMesh,
+    sphereMode: s.sphereMode,
+    sphereRadius: s.sphereRadius,
+    sampleShape: s.sampleShape,
+    viewMode: s.viewMode,
+    clipPlane: s.clipPlane,
+    keepOutTris: s.keepOutTris,
+    keepInTris: s.keepInTris,
+    selectionMode: s.selectionMode,
+    resultMesh: s.resultMesh,
+    brushRadius: s.brushRadius,
+    paintTriangles: s.paintTriangles,
+    beginSelectionStroke: s.beginSelectionStroke,
+    endSelectionStroke: s.endSelectionStroke,
+    viewerBackground: s.viewerBackground,
+    demoModeActive: s.demoModeActive,
+    demoRunId: s.demoRunId,
+    params: s.params,
+    generationSeed: s.generationSeed,
+    demoParamsByType: s.demoParamsByType,
+    setLatticeType: s.setLatticeType,
+    viewportResetSignal: s.viewportResetSignal,
+    validation: s.validation,
+    showThinFeatures: s.showThinFeatures,
+    pinnedRun: s.pinnedRun,
+    showPinnedRun: s.showPinnedRun,
+    showBuildPlateGrid: s.showBuildPlateGrid,
+    resultSnapshot: s.resultSnapshot,
+    setViewMode: s.setViewMode,
+  })));
+  // The result views can show the pinned run instead of the current one.
+  const shownPinnedRun = showPinnedRun ? pinnedRun : null;
+  const displayedResult = shownPinnedRun ? shownPinnedRun.resultMesh : resultMesh;
+  const displayedValidation = shownPinnedRun ? shownPinnedRun.validation : validation;
+  const displayedSnapshot = shownPinnedRun ? shownPinnedRun.snapshot : resultSnapshot;
+  // Cached display geometry survives only for the current and pinned results.
+  useRetainResultGeometries(resultMesh, pinnedRun?.resultMesh);
+  const thinPoints = displayedValidation?.minThickness.thinPoints ?? [];
+  const thinBounds = useMemo(() => (displayedResult ? resultBounds(displayedResult) : new THREE.Box3()), [displayedResult]);
+  const [gizmoViewRequest, setGizmoViewRequest] = useState<{ view: GizmoViewRequest | null; signal: number }>({ view: null, signal: 0 });
+  const [painting, setPainting] = useState(false);
+  const r3fStateRef = useRef<RootState | null>(null);
+  const escapeHolePreviewBounds = useMemo(() => {
+    if (originalMesh) return meshBounds(originalMesh);
+    if (sphereMode && sampleShape) return meshBounds(generateSampleMesh(sampleShape, sphereRadius));
+    return new THREE.Box3();
+  }, [originalMesh, sampleShape, sphereMode, sphereRadius]);
+  // The grid sits under whatever the viewer shows: the result in the result
+  // views, else the source model.
+  const gridSourceBounds = viewMode !== 'original' && displayedResult ? thinBounds : escapeHolePreviewBounds;
+  const gridSpec = useMemo(() => {
+    if (!showBuildPlateGrid || gridSourceBounds.isEmpty()) return null;
+    const { min, max } = gridSourceBounds;
+    return buildPlateGridSpec({ min: [min.x, min.y, min.z], max: [max.x, max.y, max.z] });
+  }, [gridSourceBounds, showBuildPlateGrid]);
+  const [skinHintDismissed, setSkinHintDismissed] = useState(false);
+  const [compactViewer, setCompactViewer] = useState(false);
+  const showSkinHint = viewMode === 'lattice'
+    && Boolean(displayedResult)
+    && !skinHintDismissed
+    && resultHasClosedSkin(displayedSnapshot?.params);
+
+  const placingHoles = selectionMode === 'place_hole';
+  const placeHole = useCallback((point: [number, number, number]) => {
+    const state = useStore.getState();
+    state.updateParams({
+      escapeHolePlacement: 'manual',
+      escapeHoleManualCenters: [...state.params.escapeHoleManualCenters, ...point.map((v) => Math.round(v * 100) / 100)],
+    });
+  }, []);
+
+  const requestView = useCallback((view: GizmoViewRequest) => {
+    setGizmoViewRequest((request) => ({ view, signal: request.signal + 1 }));
+  }, []);
+
+  // Presets chosen from the toolbar's Views menu arrive through the store.
+  // A remount must not replay the last preset, so only newer signals apply.
+  const cameraViewRequest = useStore((s) => s.cameraViewRequest);
+  const handledCameraSignal = useRef(cameraViewRequest.signal);
+  useEffect(() => {
+    if (!cameraViewRequest.view || cameraViewRequest.signal === handledCameraSignal.current) return;
+    handledCameraSignal.current = cameraViewRequest.signal;
+    requestView(cameraViewRequest.view);
+  }, [cameraViewRequest, requestView]);
+
+  const handleViewportKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    const state = r3fStateRef.current;
+    if (!state) return;
+    // Read controls lazily: OrbitControls (makeDefault) registers after onCreated.
+    const controls = state.get().controls as ResettableOrbitControls | null;
+    if (applyViewportKeyboardAction(event.key, event.shiftKey, { camera: state.camera, controls: controls ?? null })) {
+      event.preventDefault();
+    }
+  }, []);
+
+  if (demoModeActive) {
+    return (
+      <div style={{ width: '100%', height: '100%', backgroundColor: viewerBackground }}>
+        <DemoGridView
+          key={viewportResetSignal}
+          params={params}
+          generationSeed={generationSeed}
+          demoParamsByType={demoParamsByType}
+          runId={demoRunId}
+          viewMode={viewMode}
+          clipPlane={clipPlane}
+          selectedLatticeType={params.latticeType}
+          onSelectLatticeType={setLatticeType}
+          sourceMesh={originalMesh}
+          sphereMode={sphereMode}
+          sphereRadius={sphereRadius}
+          sampleShape={sampleShape}
+          keepOutTris={keepOutTris}
+          keepInTris={keepInTris}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: viewerBackground }}>
+      <div
+        className="viewer-canvas-surface"
+        role="application"
+        aria-label="3D model viewport. Use arrow keys to orbit, plus and minus to zoom, and hold Shift with arrow keys to pan."
+        tabIndex={0}
+        onKeyDown={handleViewportKeyDown}
+        style={{ cursor: selectionMode !== 'none' && (originalMesh || placingHoles) ? 'crosshair' : undefined }}
+      >
+      <Canvas
+        camera={{ fov: 50, near: 0.1, far: 10000, up: [0, 0, 1] }}
+        gl={{ localClippingEnabled: true }}
+        onCreated={(state) => {
+          state.camera.up.set(0, 0, 1);
+          r3fStateRef.current = state;
+          watchContextLoss(state.gl.domElement);
+        }}
+      >
+        <ViewerLighting />
+
+        <ViewportResizeSync />
+        <FramedCamera view={gizmoViewRequest.view} signal={gizmoViewRequest.signal} />
+
+        {viewMode === 'original' && originalMesh && (
+          <OriginalMeshView
+            mesh={originalMesh}
+            keepOutTris={keepOutTris}
+            keepInTris={keepInTris}
+            selectionMode={selectionMode}
+            brushRadius={brushRadius}
+            onPaint={paintTriangles}
+            onStrokeStart={beginSelectionStroke}
+            onStrokeEnd={endSelectionStroke}
+            onPaintingChange={setPainting}
+            onPlaceHole={placingHoles ? placeHole : undefined}
+          />
+        )}
+        {viewMode === 'original' && sphereMode && !originalMesh && sampleShape && (
+          <SampleMeshView
+            shape={sampleShape}
+            radius={sphereRadius}
+            keepOutTris={keepOutTris}
+            keepInTris={keepInTris}
+            onPlaceHole={placingHoles ? placeHole : undefined}
+          />
+        )}
+        {viewMode === 'original' && <EscapeHolePreview bounds={escapeHolePreviewBounds} params={params} />}
+        {gridSpec && <BuildPlateGrid spec={gridSpec} />}
+
+        {viewMode === 'lattice' && displayedResult && <ResultMeshView result={displayedResult} />}
+        {viewMode === 'cross_section' && displayedResult && <CrossSectionView result={displayedResult} clip={clipPlane} />}
+        {viewMode === 'xray' && displayedResult && <XRayView result={displayedResult} />}
+        {viewMode !== 'original' && displayedResult && showThinFeatures && thinPoints.length > 0 && (
+          <ThinFeatureMarkers points={thinPoints} bounds={thinBounds} />
+        )}
+
+        <OrbitControls makeDefault enabled={!painting} target={[0, 0, 0]} />
+        <ViewerCameraSession />
+        <ResponsiveViewGizmo onSelectView={requestView} onCompactChange={setCompactViewer} />
+      </Canvas>
+      </div>
+      {/* Wide viewers place these separately; compact ones stack them above the toolbar. */}
+      <div className={`viewer-overlay-dock${compactViewer ? ' is-compact' : ''}`}>
+      {gridSpec && (
+        <div className="viewer-scale-label">
+          <span className="viewer-scale-swatch" aria-hidden="true" />
+          Grid {formatGridSpacing(gridSpec.major)}
+          <span className="viewer-scale-minor">
+            <span className="visually-hidden"> squares, subdivided every </span>
+            <span aria-hidden="true">· </span>
+            {formatGridSpacing(gridSpec.minor)}
+          </span>
+        </div>
+      )}
+      {showSkinHint && (
+        <div className="viewer-skin-hint" role="note">
+          <span className="viewer-skin-hint-text">The skin hides the lattice. Use Cross-Section or X-Ray to see inside.</span>
+          <span className="viewer-skin-hint-text-short" aria-hidden="true">Skin hides the lattice</span>
+          <div className="viewer-skin-hint-actions">
+            <button type="button" className="btn btn-small" onClick={() => setViewMode('cross_section')}>Cross-Section</button>
+            <button type="button" className="btn btn-small" onClick={() => setViewMode('xray')}>X-Ray</button>
+            <button
+              type="button"
+              className="btn btn-small viewer-skin-hint-dismiss"
+              aria-label="Dismiss hint"
+              title="Dismiss hint"
+              onClick={() => setSkinHintDismissed(true)}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+      </div>
+    </div>
+  );
+}

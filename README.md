@@ -1,0 +1,334 @@
+# OpenLattice3D
+
+A browser-based tool for generating 3D-printable lattice structures inside arbitrary meshes. It supports twelve lattice types — TPMS sheets (Gyroid, Schwarz P, Schwarz D, Neovius, IWP), strut lattices (BCC, Octet, Diamond, Hexagon, Triangle), and stochastic structures (Voronoi foam, Spinodal) — with SDF-based geometry processing and marching-cubes mesh extraction. All model processing runs locally in browser Web Workers; no model-upload service is required.
+
+**Live app:** [openlattice3d.com](https://openlattice3d.com) · **Health check:** [`GET /health`](https://openlattice3d.com/health)
+
+## Main Features
+
+- Import binary or ASCII STL, 3MF (declared units converted to millimetres, components and build transforms applied), or OBJ meshes, or start from a printable procedural sample shape.
+- Generate twelve TPMS, strut, and stochastic lattice families with adjustable cell size, shell, feature, drainage-hole, and resolution parameters.
+- Keep work local: generation and validation run in browser Web Workers, and projects can be saved and restored as JSON.
+- Check printable-mesh properties including surface deviation, minimum thickness, manifoldness, watertightness, and connected components.
+- Export validated results as STL, 3MF, or OBJ, with optional tolerance-bounded mesh simplification.
+- Compare all twelve lattice types side by side before selecting one to export.
+
+## Requirements
+
+- Node.js 22 (the CI baseline uses Node 22)
+- npm 10 or newer
+- A modern desktop browser with WebGL support
+
+## Quick Start
+
+```bash
+npm ci
+npm run dev
+```
+
+Open http://127.0.0.1:5176 in your browser.
+
+## Local Development
+
+```bash
+npm run dev        # Vite dev server
+npm run lint       # ESLint
+npm run typecheck  # TypeScript project check
+npm test           # Vitest unit tests (geometry core)
+npm run build      # Typecheck + production build into dist/
+npm run test:e2e   # Playwright end-to-end and axe checks against the production build
+```
+
+`npm run test:e2e` builds the app (without re-running unit tests), serves it
+with `vite preview` on `127.0.0.1:4180`, and drives Chromium with SwiftShader
+WebGL. Install the browser once with `npx playwright install chromium`, or point
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` at an existing Chromium build.
+
+`npm run dev` binds only to `127.0.0.1`. Use the generated `dist/` directory
+with `npm run preview` to inspect the production bundle locally.
+
+## Deploy to Cloudflare Workers
+
+Production is a static Cloudflare Workers site. Cloudflare serves the Vite
+bundle from `dist/`; the small Worker in `worker/index.ts` provides the
+uncached health responses used by uptime monitors and a strictly allowlisted optional analytics relay. The application has
+no configured application secrets. Optional Glimpse analytics have a rate-limit binding and two collection switches (`GLIMPSE_BASIC_ENABLED`, `GLIMPSE_USAGE_ENABLED`). `wrangler.jsonc` sets both to `"true"` for production and binds the `GLIMPSE` collector service; branch previews set both to `"false"`. Optional browser usage events additionally require each browser's opt-in consent, which is off by default. See [analytics and rollout](docs/glimpse.md).
+
+```bash
+npm ci
+npm run build
+npx wrangler deploy
+```
+
+Before deploying your own copy, change the Worker name and routes in
+`wrangler.jsonc`; do not reuse the public project domains. Authenticate
+Wrangler using your Cloudflare account (for example, `npx wrangler login`) and
+keep account credentials out of the repository. After deployment, verify both
+the app and the health endpoint:
+
+```bash
+curl --fail --show-error --silent https://YOUR_DOMAIN/
+curl --fail --show-error --silent https://YOUR_DOMAIN/health
+```
+
+## Self-Hosting
+
+This is a client-side application: build it with `npm ci && npm run build`,
+then serve the resulting `dist/` directory over HTTPS. For a non-Cloudflare
+host, configure all of the following:
+
+1. Rewrite unknown application routes to `index.html` so the single-page app can load.
+2. Send `Cross-Origin-Opener-Policy: same-origin` and
+   `Cross-Origin-Embedder-Policy: require-corp` headers for application assets.
+3. Provide `GET /health` as a `200` JSON response (for example,
+   `{"status":"ok"}`) with `Cache-Control: no-store`; do not rewrite this
+   request to `index.html`.
+
+The supplied `public/_headers` file configures the required cross-origin
+isolation headers on Cloudflare, plus a same-origin-only
+`Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, and a restrictive `Permissions-Policy`.
+`npm run preview` sends the same set; the dev server omits only the CSP
+because Vite's hot reload injects inline code. Other hosts use their own equivalent header
+and rewrite configuration. Avoid third-party embedded assets unless they send
+headers compatible with the isolation policy described below.
+
+### Cross-origin isolation
+
+The app sends these headers in Vite dev, Vite preview, and Cloudflare static assets:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+These headers prepare the app for `SharedArrayBuffer` and threaded WebAssembly, but generation
+does not currently require either feature. When generation starts, the app logs runtime support
+for `crossOriginIsolated`, `SharedArrayBuffer`, and threaded-WASM readiness.
+
+COEP can block third-party iframes, scripts, images, or worker resources unless those resources
+send compatible CORS or `Cross-Origin-Resource-Policy` headers. Keep third-party embeds on a
+non-isolated page or use an external link when the provider cannot opt in.
+
+### Feedback form
+
+Feedback is collected through an external form link rather than an embedded iframe. This avoids
+COEP compatibility problems with third-party form resources.
+
+## How to Use
+
+The workspace walks through numbered steps in the top bar: **Model → Regions → Lattice →
+Shell → Generate → Results** (Regions only appears for imported STL meshes). Each step's
+panel asks one question; **Back** / **Continue** (or `B` / `N`) move between them, and
+less-used settings sit under **More options**. Generate is always available in the top bar.
+
+### 1. Import a Model
+
+- **Import a model**: load an STL (binary or ASCII), 3MF, or OBJ file, from the picker or
+  by dropping it onto the page. The model card shows its size, volume, and how many lattice
+  cells fit across the shortest side. 3MF files declare their unit, which is converted to
+  millimetres explicitly. STL and OBJ carry no units, so a part under 5 mm or over 1 m across
+  gets a prompt to keep it as millimetres or convert (from inches, ×10, ×0.1). Open or non-manifold meshes get their face normals recomputed
+  and the card says so plainly; **Close holes** fills the boundary loops so the mesh can be
+  used. Your lattice parameters survive a model change.
+- **Open project**: resume a versioned project with its parameters, embedded source mesh,
+  selection masks, validation results, and viewer state. Legacy parameter-only JSON files
+  remain supported; malformed or out-of-range values are ignored.
+- **Samples**: pick a built-in procedural shape from the start card or the Model step (sphere, cube, cylinder, torus, capsule)
+  with print-ready defaults. Procedural shapes use analytic SDFs and a tiled multi-worker
+  CPU backend for fast generation.
+
+### 2. Configure Lattice Parameters
+
+- **Lattice Type**: TPMS sheet (Gyroid, Schwarz P/D, Neovius, IWP), strut (BCC, Octet,
+  Diamond, Hexagon, Triangle), or stochastic (Voronoi, Spinodal).
+- **Cell Size**: lattice unit cell dimension (default 8mm).
+- **Shell / No shell / Surface only**: keep an outer shell of given thickness, generate a pure
+  lattice, or confine the lattice to a band near the surface (hollow inside).
+- **Escape Holes**: subtract one or more axis-aligned drainage cylinders from shell-bearing
+  parts, with a live translucent placement preview. Placement is automatic (spread over the
+  part) or **Click on the model**: choose "Place holes", click the part in the Original view,
+  and a hole runs along the build axis through each click; the list under the control removes
+  individual holes.
+- **Wall Thickness / Strut Diameter**: lattice feature size depending on type.
+- **Min Feature Size & Tolerance**: validation targets.
+- **Export Resolution**: marching cubes sampling density (1–10; 11–12 run in tiles only and need roughly 1 GB of memory, see `docs/performance/large-parts.md`).
+- **Remove Features**: applies a morphological opening that removes features
+  below the selected width without uniformly thinning geometry that survives.
+  The run log reports when the export grid cannot resolve the requested width.
+
+### 3. Compare
+
+In the Lattice step, choose "Compare all 12 on this part" to render every lattice type side-by-side for the
+current model, opening in the cross-section view so the tiles actually differ. Parameters
+are shared across tiles, so an edit re-queues every tile and the comparison stays
+like-for-like. Tiles show "Queued" until their run starts and the status bar reports how
+many of the twelve are done. Click a tile to make that lattice type active.
+
+Choosing Hexagon or Triangle switches to surface mode with its own recommended values;
+switching back restores what you had unless you changed it in the meantime.
+
+### 4. Generate
+
+The **Estimate** block in the Generate step shows the grid, voxel size, and
+rough triangle, time and memory estimates for the current settings, plus any sanity
+warnings (cell larger than the part, shell filling it, walls thinner than two voxels, open
+mesh). Click **Generate** (top bar or Generate step, or press `G`); a finished run opens the
+Results step. Computation runs in background Web Workers with
+progress, time estimates, and run logs (drawer in the status bar); validation reports its own
+progress once the mesh lands. Hotkeys `1`–`4` switch viewer modes (Original, Solid,
+Cross-Section, X-Ray); `H` resets the viewport. `Ctrl/Cmd+Z` and `Ctrl/Cmd+Shift+Z` undo and
+redo painting, parameter edits, and seed changes on one history (rapid edits of one field
+collapse into a single step). The cross-section position is shown in millimetres along the
+cut axis.
+
+**Compare runs**: pin a result under **Compare runs** in the Results step, change settings, generate again, and
+flip the viewer between the pinned and current runs; the panel lists the parameter
+differences. The Min Thickness card can mark the sampled spots that measured thinner than
+the target directly on the model.
+
+### 5. Validate
+
+After generation, the Results step leads with the verdict and four numbers (relative
+density, mass or volume, thinnest feature, triangles), then the checks:
+- **Out of date**: whenever a parameter, the seed, the model, or the painted faces change
+  after a run, the result on screen is kept but marked out of date in the status bar, the
+  validation panel, and the export buttons until you regenerate. Cancelling a run keeps the
+  previous result and its verdict.
+- **Outer Deviation**: max deviation from original surface vs. tolerance
+- **Min Thickness**: thinnest feature measured (must exceed min feature size)
+- **Manifold/Watertight**: printability check
+- **Connectivity**: counts separate solid bodies by the volume each closed surface encloses.
+  A shell around a sheet lattice legitimately has one outer skin plus one inner surface per
+  enclosed void network; those are reported as enclosed voids (with a trapped-powder warning
+  when escape holes are off), not as fragments. Zero-volume slivers are listed as negligible.
+
+### 6. Export
+
+- **Export STL**: binary STL of the lattice result (outward-oriented triangles)
+- **Export 3MF**: indexed triangle mesh in a standards-based, millimetre-unit 3MF package
+- **Export OBJ**: indexed Wavefront OBJ geometry (the format does not declare units)
+- **Save Project JSON**: a resumable project with its source geometry and workspace state
+
+Validation, part statistics and export live in the **Results** step; below 1120 px the step
+panel sits under the viewer.
+
+Every project carries a versioned 32-bit generation seed. Repeated generation with the same
+project, seed, application version, parameters, and resolution is byte-deterministic even when
+tile completion order or the worker-pool size changes. Use **Reseed** for an intentional new
+stochastic result; it lives under **More options** in the Generate step and marks the current
+result out of date rather than discarding it. Generation never draws from ambient randomness. Project JSON preserves the
+seed and PRNG version, while STL, 3MF, and OBJ exports include the seed in their available
+metadata fields.
+
+Mesh exports can optionally reduce triangle count while keeping simplification
+error within the configured geometric tolerance.
+
+After validation, the Results step also reports generated volume, relative density, material
+reduction, and optional mass when a material density is configured.
+
+## Architecture
+
+```
+src/
+  geometry/                 # Core geometry engine (pure, fully unit-tested)
+    vec3.ts                 # Vector math utilities
+    bvh.ts                  # BVH acceleration for nearest-triangle / signed distance
+    stl-parser.ts           # STL import/export (binary + ASCII, hardened against bad input)
+    mesh-analysis.ts        # Watertight/manifold checks, repair, procedural meshes
+    mesh-topology.ts        # Edge topology, manifold defects, connected components
+    marching-cubes.ts       # Marching cubes iso-surface extraction
+    mesh-repair.ts          # Post-generation cleanup: closes marching-cubes cracks and tile seams
+    morphology.ts           # Thin-section opening on the sampled field before extraction
+    lattice.ts              # Lattice SDFs + combined shell/core/surface builders
+    validation.ts           # Deviation, thickness, manifold, connectivity checks
+  workers/
+    lattice-worker.ts       # Generation and validation orchestrator
+    lattice-tile-worker.ts  # One marching-cubes tile per message (CPU tiled backend)
+    tiled-generation.ts     # Bounded worker fan-out, sparse skipping, deterministic merge
+    generation-estimate.ts  # Resolution and memory estimates
+    progress-reporter.ts    # Throttled generation progress messages
+    surface-sample-worker.ts# Poisson surface sampling for hex/tri surface lattices
+    validation-worker.ts    # Post-generation validation
+  components/
+    Viewer3D.tsx            # Viewer scene orchestration and interaction
+    viewer/                 # Mesh renderers and twelve-lattice demo grid
+    steps/                  # One panel per workflow step (Model … Results)
+    workflow.ts             # Step order, questions, and stepper state rules
+    StepNav.tsx             # Numbered stepper in the top bar
+    ViewerControls.tsx      # Floating view toolbar: modes, cross-section, camera views
+    ExportControls.tsx      # STL, 3MF, OBJ, and project JSON export
+  hooks/
+    useLatticeGeneration.ts # Worker lifecycle for generation + validation
+    useWorkspaceHotkeys.ts  # Keyboard shortcuts
+    useModelImport.tsx      # STL / project / sample intake shared by the start card and Model step
+  store/
+    useStore.ts             # Zustand global state + preference-only persistence
+  types/
+    project.ts              # Data model, params, presets, param sanitization
+  utils/
+    project-file.ts         # Versioned project serialization and restoration
+    export.ts               # Browser download helpers
+```
+
+See [docs/architecture.md](./docs/architecture.md) for the data flow, geometry
+contracts, and module boundaries. Production generation uses the tested CPU tiled and
+single-worker paths; see [the backend decision](./docs/performance/backend-decision.md).
+
+### SDF Pipeline (Shell + Core)
+1. Compute signed distance field from input mesh (BVH-accelerated) or analytic shape SDF
+2. Define shell region: `max(d_obj, -(d_obj + shell_thickness))`
+3. Evaluate lattice SDF inside core region
+4. Smooth union of shell and core lattice (polynomial smooth-min)
+5. Extract mesh via marching cubes at iso=0, drop disconnected fragments
+
+### Validation
+- Outer deviation: sample surface points, measure signed distance to original
+- Min thickness: ray march inward along normals to measure wall/strut width
+- Manifold: edge-count analysis (each edge shared by exactly 2 triangles)
+- Connectivity: flood-fill on triangle adjacency graph
+
+## Privacy & data
+
+Optional usage analytics start off. Opt in or withdraw in the top bar's **⋯ project menu → Privacy & data**; browser privacy signals suppress sends. Only fixed values can be collected: operation counts, fixed failure codes, and coarse ranges for durations, saved project size and lattice cell count, with no model contents, filenames, error messages, exact sizes, URLs or visitor IDs. The current notice is consent version 2; an earlier (version 1) choice keeps covering only the original counts until you allow the updated analytics. You can download this page's diagnostic counts as a JSON report to inspect and share yourself. Collection also requires a deliberately configured and enabled backend. See [the data boundary and rollout](docs/glimpse.md).
+
+## Testing
+
+Unit tests cover STL parsing (including malformed and shipped-asset round trips), marching
+cubes, BVH distances, all lattice SDFs and TPMS thickness calibration, topology stress cases,
+escape-hole subtraction, watertight repair, tolerance-bounded simplification, morphology,
+3MF/OBJ packaging, project restoration and seed migration, repeatable geometry hashes,
+worker-count independence, worker failure/cancellation races, state history, and parameter
+sanitization.
+
+```bash
+npm test
+```
+
+## Test Assets
+
+Pre-generated STL files in `public/assets/`:
+- `sphere-25mm.stl` - 25mm radius sphere (3968 triangles)
+- `sphere-10mm.stl` - 10mm radius sphere (2208 triangles)
+- `cube-30mm.stl` - 30mm cube (12 triangles)
+
+Regenerate with: `node scripts/generate-test-assets.mjs`
+
+## License
+
+Apache-2.0. See [LICENSE](./LICENSE).
+
+### Public liveness endpoint
+
+`GET /healthz` returns HTTP 200 with JSON `status: "ok"` and a service name.
+`HEAD /healthz` returns the same headers without a body; other methods return
+405 with `Allow: GET, HEAD`. Responses use `Cache-Control: no-store`.
+This endpoint requires no application credentials and performs no storage or
+upstream requests. It reports Worker liveness, not dependency readiness or
+browser geometry/solver health. Existing health endpoints keep their behavior.
+
+Cloudflare Access, WAF, and bot challenges run before the Worker. If a monitor
+receives a login redirect or challenge, configure a narrowly scoped exception
+for GET/HEAD on the exact `/healthz` path and the intended app hostname, then
+verify the JSON response from the monitor's network. Repository changes alone
+do not alter those dashboard policies.

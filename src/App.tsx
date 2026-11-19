@@ -1,0 +1,648 @@
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent, type UIEvent } from 'react';
+import { Viewer3D } from './components/Viewer3D';
+import { ViewerControls } from './components/ViewerControls';
+import { StepNav } from './components/StepNav';
+import { ProjectMenu } from './components/ProjectMenu';
+import { StartOverlay } from './components/StartOverlay';
+import { ModelIntakeLayer } from './components/ModelIntakeLayer';
+import { ModelStep } from './components/steps/ModelStep';
+import { RegionsStep } from './components/steps/RegionsStep';
+import { LatticeStep } from './components/steps/LatticeStep';
+import { ShellStep } from './components/steps/ShellStep';
+import { GenerateStep } from './components/steps/GenerateStep';
+import { ResultsStep } from './components/steps/ResultsStep';
+import { PlayIcon, SquareIcon, XIcon } from './components/icons';
+import { adjacentStep, canNavigateToStep, reachableStep, visibleSteps, type WorkflowInputs } from './components/workflow';
+import { useWorkflowInputs } from './hooks/useWorkflow';
+import type { LatticeGenerationControls } from './hooks/useLatticeGeneration';
+import type { LatticeType } from './types/project';
+import { useStore, type LogEntry, type WorkflowStep } from './store/useStore';
+import { registerNotificationServiceWorker } from './utils/notifications';
+import { escapeControlCharacters } from './utils/text-safety';
+import { useLatticeGeneration } from './hooks/useLatticeGeneration';
+import { useWorkspaceHotkeys } from './hooks/useWorkspaceHotkeys';
+import { summarizeValidation } from './utils/validation-summary';
+import { describeGenerationProgress } from './utils/generation-progress';
+import { compareChecksSummary, solverStatus as describeSolverStatus } from './utils/status-bar';
+import { useResultStaleness } from './store/useResultStaleness';
+import { trackUsage } from './analytics';
+import { CONFIRM_TIMEOUT_MS, confirmActionLabel, confirmHint } from './components/confirm';
+import { keepResultsOffer, runFinishAction } from './components/results-ready';
+import { ViewportErrorBoundary } from './components/ViewportErrorBoundary';
+import './App.css';
+
+function App() {
+  const persistenceHydrated = useStore((state) => state.persistenceHydrated);
+  return persistenceHydrated ? <HydratedApp /> : <AppBootShell />;
+}
+
+function AppBootShell() {
+  return (
+    <div className="app-shell boot-shell" aria-busy="true" data-boot-state="restoring">
+      <h1 className="visually-hidden">OpenLattice3D — 3D lattice generator</h1>
+      <header className="topbar">
+        <div className="brand" aria-label="Open Lattice 3D">
+          <span className="brand-mark" aria-hidden="true">
+            <img src="/favicon.svg" alt="" />
+          </span>
+          <span>OpenLattice3D</span>
+          <span className="version-chip">beta</span>
+        </div>
+
+        <div className="topbar-divider" />
+        <div className="chrome-path" aria-label="Project status">
+          <span className="breadcrumb-chip">Checking workspace</span>
+        </div>
+      </header>
+
+      <main className="workspace" id="main-content">
+        <section className="viewer-shell boot-viewer-shell" aria-label="3D lattice viewer">
+          <div className="boot-viewer-state" role="status" aria-live="polite">
+            <strong>Checking saved preferences…</strong>
+            <span>Your viewer settings will be ready in a moment.</span>
+          </div>
+        </section>
+
+        <section className="side-panel" aria-label="Lattice workflow panel">
+          <div className="boot-panel-placeholder" aria-hidden="true">
+            <span className="boot-skeleton-line boot-skeleton-line-short" />
+            <span className="boot-skeleton-line boot-skeleton-line-wide" />
+            <span className="boot-skeleton-line" />
+            <span className="boot-skeleton-line boot-skeleton-line-wide" />
+          </div>
+        </section>
+      </main>
+
+      <footer className="statusbar">
+        <div className="statusbar-group" aria-label="Workspace restore status">
+          <span className="statusbar-segment">Preferences: Loading</span>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function HydratedApp() {
+  const {
+    originalMesh,
+    sphereMode,
+    resultMesh,
+    generating,
+    progress,
+    progressMessage,
+    params,
+    meshFileName,
+    demoModeActive,
+    logs,
+    clearLogs,
+    validation,
+    keepOutTris,
+    keepInTris,
+    selectionMode,
+    demoQueue,
+    validationProgress,
+    showPinnedRun,
+    pinnedRun,
+    workflowStep,
+    setWorkflowStep,
+    sessionRestored,
+  } = useStore();
+  const generationControls = useLatticeGeneration();
+  const countedOpen = useRef(false);
+  useEffect(() => {
+    if (countedOpen.current) return;
+    countedOpen.current = true;
+    trackUsage('workspace_opened');
+  }, []);
+  const staleness = useResultStaleness();
+  const workflowInputs = useWorkflowInputs();
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const logsTabRef = useRef<HTMLButtonElement>(null);
+  const logsDrawerRef = useRef<HTMLDivElement>(null);
+  const logsToggledRef = useRef(false);
+
+  useWorkspaceHotkeys(generationControls);
+
+  // A step that disappears (painting without a mesh) or closes (results after a
+  // reset) hands over to the nearest reachable step before it.
+  const reachable = reachableStep(workflowStep, workflowInputs);
+  const stepVisible = visibleSteps(workflowInputs).some((step) => step.id === workflowStep);
+  useEffect(() => {
+    if (!stepVisible || !canNavigateToStep(workflowStep, workflowInputs)) setWorkflowStep(reachable);
+  }, [reachable, setWorkflowStep, stepVisible, workflowInputs, workflowStep]);
+
+  // A run that finishes on the Generate step lands on its result. One started
+  // from the top bar while editing another step leaves the user there and
+  // offers the result instead (see results-ready.ts).
+  const wasGenerating = useRef(generating);
+  const runStart = useRef<{ step: WorkflowStep; result: typeof resultMesh } | null>(null);
+  const [resultsOffered, setResultsOffered] = useState(false);
+  useEffect(() => {
+    const started = !wasGenerating.current && generating;
+    const finished = wasGenerating.current && !generating;
+    wasGenerating.current = generating;
+    if (started) {
+      runStart.current = { step: useStore.getState().workflowStep, result: resultMesh };
+      return;
+    }
+    if (!finished) return;
+    const start = runStart.current;
+    runStart.current = null;
+    const action = runFinishAction({
+      // A run already under way at mount is treated like one watched from Generate.
+      startedOnStep: start?.step ?? 'generate',
+      currentStep: useStore.getState().workflowStep,
+      hasResult: Boolean(resultMesh),
+      newResult: Boolean(resultMesh) && resultMesh !== start?.result,
+    });
+    if (action === 'show-results') setWorkflowStep('results');
+    else if (action === 'offer-results') setResultsOffered(true);
+  }, [generating, resultMesh, setWorkflowStep]);
+  // Visiting Results, starting another run or losing the result retires the offer for good.
+  const resultsOfferCurrent = keepResultsOffer({ currentStep: workflowStep, generating, hasResult: Boolean(resultMesh) });
+  if (resultsOffered && !resultsOfferCurrent) setResultsOffered(false);
+  const showResultsOffer = resultsOffered && resultsOfferCurrent;
+
+  // B and N walk the workflow, like the panel footer's Back and Continue.
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.closest('input, select, textarea, [contenteditable="true"]'))) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'b' && key !== 'n') return;
+      const step = adjacentStep(useStore.getState().workflowStep, workflowInputs, key === 'n' ? 1 : -1);
+      if (!step || !canNavigateToStep(step.id, workflowInputs)) return;
+      event.preventDefault();
+      setWorkflowStep(step.id);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [setWorkflowStep, workflowInputs]);
+
+  const toggleLogs = useCallback(() => {
+    logsToggledRef.current = true;
+    setLogsExpanded((current) => !current);
+  }, []);
+
+  const closeLogs = useCallback(() => {
+    logsToggledRef.current = true;
+    setLogsExpanded(false);
+  }, []);
+
+  // Move focus into the drawer when it opens, and back to its toggle when it closes.
+  useEffect(() => {
+    if (!logsToggledRef.current) return;
+    if (logsExpanded) logsDrawerRef.current?.focus();
+    else logsTabRef.current?.focus();
+  }, [logsExpanded]);
+
+  useEffect(() => {
+    void registerNotificationServiceWorker();
+  }, []);
+
+  const hasModel = Boolean(originalMesh || sphereMode);
+  const modelLabel = meshFileName || (sphereMode ? 'Primitive sphere' : 'Untitled lattice study');
+  const resultStats = showPinnedRun && pinnedRun
+    ? `Pinned run · ${pinnedRun.resultMesh.triCount.toLocaleString()} tris`
+    : resultMesh
+      ? `${resultMesh.triCount.toLocaleString()} tris${staleness.stale ? ' · settings changed' : ''}`
+      : 'Mesh pending';
+  const progressLabel = `${Math.round(progress * 100)}%`;
+  const progressView = describeGenerationProgress(progress, progressMessage);
+  const { text: solverStatus, tone: statusTone } = describeSolverStatus({ generating, progressView, demoModeActive, demoQueue, hasModel });
+  const showFaceLegend = keepOutTris.size > 0 || keepInTris.size > 0 || (selectionMode !== 'none' && selectionMode !== 'place_hole');
+  const checks = demoModeActive && !generating
+    ? compareChecksSummary()
+    : summarizeValidation(validation, Boolean(resultMesh), generating, staleness.stale, validationProgress);
+  // Parameters survive a reload but meshes never do; say so once instead of silently showing the bare model.
+  const showRestoreNotice = sessionRestored && hasModel && !resultMesh && !generating && !demoModeActive;
+  const dismissRestoreNotice = useCallback(() => useStore.setState({ sessionRestored: false }), []);
+  useEffect(() => {
+    if (sessionRestored && (resultMesh || generating)) dismissRestoreNotice();
+  }, [dismissRestoreNotice, generating, resultMesh, sessionRestored]);
+  const canGenerate = hasModel && !demoModeActive;
+  const studySummary = hasModel
+    ? `${latticeLabel(params.latticeType)} · ${params.cellSize} mm cells${resultMesh ? ` · ${resultStats}` : ''}`
+    : 'Load a part to begin';
+
+  // The statusbar verdict is a route to the detail, not another dead readout.
+  const revealValidation = () => {
+    if (!resultMesh) {
+      setWorkflowStep('generate');
+      return;
+    }
+    setWorkflowStep('results');
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById('validation-panel');
+      if (!target) return;
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
+      target.focus({ preventScroll: true });
+    });
+  };
+
+  return (
+    <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
+      {/* Drag-and-drop STL import and the replace-model confirmation. */}
+      <ModelIntakeLayer />
+      <h1 className="visually-hidden">OpenLattice3D — 3D lattice generator</h1>
+      <header className="topbar">
+        <div className="brand" aria-label="Open Lattice 3D">
+          <span className="brand-mark" aria-hidden="true">
+            <img src="/favicon.svg" alt="" />
+          </span>
+          <span className="brand-name">OpenLattice3D</span>
+          <span className="version-chip">beta</span>
+        </div>
+
+        <div className="topbar-divider" />
+        <div className="chrome-path" aria-label="Project status">
+          <span className="breadcrumb-chip" title={modelLabel}>{hasModel ? modelLabel : 'No part loaded'}</span>
+        </div>
+
+        <StepNav inputs={workflowInputs} />
+
+        <div className="topbar-tools">
+          {generating ? (
+            <button
+              type="button"
+              className="topbar-action running"
+              style={{ '--run-progress': `${Math.round(progress * 100)}%` } as CSSProperties}
+              title="Stop the current generation job. The previous result stays."
+              aria-label={`Cancel generation, ${progressLabel} complete`}
+              onClick={generationControls.cancelGeneration}
+            >
+              <SquareIcon size={13} />
+              <span>Cancel · {progressLabel}</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="topbar-action btn-primary"
+              disabled={!canGenerate}
+              title={demoModeActive
+                ? 'Close the comparison grid to generate a full-resolution lattice.'
+                : hasModel ? 'Generate the lattice with the current settings (G).' : 'Load a part first.'}
+              onClick={generationControls.startGeneration}
+            >
+              <PlayIcon size={13} />
+              <span>{staleness.stale ? 'Regenerate' : 'Generate'}</span>
+              <kbd>G</kbd>
+            </button>
+          )}
+          <ProjectMenu />
+        </div>
+      </header>
+
+      <div className="step-nav-strip">
+        <StepNav inputs={workflowInputs} />
+      </div>
+
+      <main className="workspace" id="main-content" tabIndex={-1}>
+        <section className={`viewer-shell${generating ? ' is-generating' : ''}`} aria-label="3D lattice viewer" aria-busy={generating || undefined}>
+          {!demoModeActive && hasModel && (
+            <div className="viewer-hud">
+              <div className="viewer-readout">
+                <span>{modelLabel}</span>
+                <strong>{resultMesh ? resultStats : 'Source model'}</strong>
+              </div>
+            </div>
+          )}
+          <ViewportErrorBoundary>
+            <Viewer3D />
+          </ViewportErrorBoundary>
+          {generating && (
+            <div className="viewer-busy" aria-hidden="true">
+              <span className="viewer-busy-pill">
+                <span className="viewer-busy-spinner" />
+                {progressView.text}
+              </span>
+            </div>
+          )}
+          {showRestoreNotice && (
+            <div className="viewer-restore-notice" role="status">
+              <span>Settings restored from your last visit. Generated lattices aren't saved between sessions — generate to see one.</span>
+              <button type="button" className="btn btn-tiny" onClick={dismissRestoreNotice} aria-label="Dismiss notice">
+                <XIcon size={12} />
+              </button>
+            </div>
+          )}
+          {/* Always mounted so screen readers announce the offer when it appears. */}
+          <div className="viewer-results-ready-region" role="status">
+            {showResultsOffer && (
+              <div className="viewer-results-ready">
+                <span className="viewer-results-ready-dot" aria-hidden="true" />
+                <span>Results ready</span>
+                <button type="button" className="btn btn-small btn-primary" onClick={() => setWorkflowStep('results')}>
+                  View results
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-tiny"
+                  onClick={() => setResultsOffered(false)}
+                  aria-label="Dismiss results notice"
+                  title="Dismiss"
+                >
+                  <XIcon size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+          {!hasModel && !demoModeActive && <StartOverlay />}
+          {showFaceLegend && !demoModeActive && (
+            <div className="viewer-legend" role="group" aria-label="Face marking legend">
+              <span className="viewer-legend-item">
+                <span className="viewer-legend-swatch" style={{ background: '#3399ff' }} aria-hidden="true" />
+                Keep-out (preserved surface)
+              </span>
+              <span className="viewer-legend-item">
+                <span className="viewer-legend-swatch" style={{ background: '#ff6633' }} aria-hidden="true" />
+                Keep-in (stays solid)
+              </span>
+            </div>
+          )}
+          {(hasModel || demoModeActive) && (
+            <div className="viewer-controls-overlay">
+              <ViewerControls />
+            </div>
+          )}
+        </section>
+
+        <section className="side-panel" aria-label="Lattice workflow panel">
+          <ActiveStep step={workflowStep} inputs={workflowInputs} generationControls={generationControls} />
+        </section>
+      </main>
+
+      {logsExpanded && (
+        <BottomLogDrawer
+          ref={logsDrawerRef}
+          logs={logs}
+          onClearLogs={clearLogs}
+          onClose={closeLogs}
+        />
+      )}
+
+      <footer className="statusbar">
+        <div className="status-tabs">
+          <button
+            ref={logsTabRef}
+            type="button"
+            className={logsExpanded ? 'active' : ''}
+            aria-expanded={logsExpanded}
+            aria-controls={logsExpanded ? 'run-logs-drawer' : undefined}
+            onClick={toggleLogs}
+          >
+            Logs
+            <span className="count-pill">{logs.length}</span>
+          </button>
+        </div>
+        <div className="statusbar-group" aria-label="Model and solver status">
+          <span className={`status-dot is-${statusTone}`} aria-hidden="true" />
+          <span className="statusbar-segment status-text">{solverStatus}</span>
+          <span className="statusbar-segment status-summary" title={studySummary}>{studySummary}</span>
+          <button
+            type="button"
+            className={`statusbar-segment validation-chip is-${checks.tone}`}
+            onClick={revealValidation}
+            disabled={!hasModel}
+            title={checks.detail}
+          >
+            <span aria-live="polite">{checks.label}</span>
+          </button>
+        </div>
+        <div className="status-links" aria-label="Project links">
+          <a
+            className="status-link donate-link"
+            href="https://ko-fi.com/esau"
+            target="_blank"
+            rel="noreferrer"
+            title="Support OpenLattice3D on Ko-fi"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M10 2v2" />
+              <path d="M14 2v2" />
+              <path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1" />
+              <path d="M6 2v2" />
+            </svg>
+            Buy me a coffee
+          </a>
+          <a
+            className="status-link"
+            href="https://form.esauengineering.com/feedback-openlattice3d"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+            Feedback
+          </a>
+          <a
+            className="status-link"
+            href="https://github.com/esaueng/OpenLattice3D"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Open GitHub repository"
+            title="Open GitHub repository"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
+              <path d="M9 18c-4.51 2-5-2-7-2" />
+            </svg>
+            GitHub
+          </a>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function ActiveStep({ step, inputs, generationControls }: {
+  step: WorkflowStep;
+  inputs: WorkflowInputs;
+  generationControls: LatticeGenerationControls;
+}) {
+  switch (step) {
+    case 'model': return <ModelStep inputs={inputs} />;
+    case 'regions': return <RegionsStep inputs={inputs} />;
+    case 'lattice': return <LatticeStep inputs={inputs} />;
+    case 'shell': return <ShellStep inputs={inputs} />;
+    case 'generate': return <GenerateStep inputs={inputs} generationControls={generationControls} />;
+    case 'results': return <ResultsStep inputs={inputs} />;
+  }
+}
+
+const LATTICE_NAMES: Partial<Record<LatticeType, string>> = {
+  gyroid: 'Gyroid', schwarzP: 'Schwarz P', schwarzD: 'Schwarz D', neovius: 'Neovius', iwp: 'IWP',
+  bcc: 'BCC', octet: 'Octet', diamond: 'Diamond', hexagon: 'Hexagon', triangle: 'Triangle',
+  voronoi: 'Voronoi', spinodal: 'Spinodal',
+};
+
+function latticeLabel(type: LatticeType): string {
+  return LATTICE_NAMES[type] ?? type;
+}
+
+const MIN_DRAWER_HEIGHT = 260;
+const DRAWER_RESIZE_STEP = 40;
+
+function maxDrawerHeight() {
+  const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 800;
+  return Math.max(MIN_DRAWER_HEIGHT, viewportHeight - 120);
+}
+
+type BottomLogDrawerProps = {
+  logs: LogEntry[];
+  onClearLogs: () => void;
+  onClose: () => void;
+};
+
+const BottomLogDrawer = forwardRef<HTMLDivElement, BottomLogDrawerProps>(function BottomLogDrawer(
+  { logs, onClearLogs, onClose },
+  ref,
+) {
+  const [drawerHeight, setDrawerHeight] = useState(320);
+  const [clearPromptVisible, setClearPromptVisible] = useState(false);
+  const dragStart = useRef<{ y: number; height: number } | null>(null);
+  const logViewRef = useRef<HTMLPreElement>(null);
+  const stickToBottom = useRef(true);
+  const formattedLogs = logs.map(formatLogEntry);
+
+  useEffect(() => {
+    if (!clearPromptVisible) return undefined;
+    const timeoutId = window.setTimeout(() => setClearPromptVisible(false), CONFIRM_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [clearPromptVisible]);
+
+  // Show the newest entry on open and follow new ones, unless the reader has
+  // deliberately scrolled back through the history.
+  useLayoutEffect(() => {
+    const view = logViewRef.current;
+    if (!view || !stickToBottom.current) return;
+    view.scrollTop = view.scrollHeight;
+  }, [drawerHeight, logs]);
+
+  function trackLogScroll(event: UIEvent<HTMLPreElement>) {
+    const view = event.currentTarget;
+    // scrollTop never reaches scrollHeight - clientHeight exactly at fractional DPRs.
+    stickToBottom.current = view.scrollHeight - view.scrollTop - view.clientHeight <= 24;
+  }
+
+  function handleDrawerKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      onClose();
+    }
+  }
+
+  function clampDrawerHeight(value: number) {
+    return Math.min(maxDrawerHeight(), Math.max(MIN_DRAWER_HEIGHT, value));
+  }
+
+  function startDrawerResize(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    dragStart.current = { y: event.clientY, height: drawerHeight };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function resizeDrawer(event: PointerEvent<HTMLButtonElement>) {
+    if (!dragStart.current) return;
+    const nextHeight = dragStart.current.height + dragStart.current.y - event.clientY;
+    setDrawerHeight(clampDrawerHeight(nextHeight));
+  }
+
+  function stopDrawerResize(event: PointerEvent<HTMLButtonElement>) {
+    dragStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleResizeKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setDrawerHeight((height) => clampDrawerHeight(height + DRAWER_RESIZE_STEP));
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setDrawerHeight((height) => clampDrawerHeight(height - DRAWER_RESIZE_STEP));
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setDrawerHeight(maxDrawerHeight());
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setDrawerHeight(MIN_DRAWER_HEIGHT);
+    }
+  }
+
+  function copyLogs() {
+    if (typeof navigator === 'undefined' || !navigator.clipboard) return;
+    void navigator.clipboard.writeText(formattedLogs.join('\n'));
+  }
+
+  function clearLogEntries(event: MouseEvent<HTMLButtonElement>) {
+    if (!logs.length) return;
+    if (clearPromptVisible || event.detail >= 2) {
+      setClearPromptVisible(false);
+      onClearLogs();
+      return;
+    }
+    setClearPromptVisible(true);
+  }
+
+  return (
+    <div
+      ref={ref}
+      id="run-logs-drawer"
+      className="bottom-content logs-content"
+      style={{ height: drawerHeight }}
+      role="group"
+      aria-label="Run logs"
+      tabIndex={-1}
+      onKeyDown={handleDrawerKeyDown}
+    >
+        <button
+          type="button"
+          className="bottom-resize-handle"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize logs drawer. Use up and down arrow keys to resize."
+          aria-valuenow={Math.round(drawerHeight)}
+          aria-valuemin={MIN_DRAWER_HEIGHT}
+          aria-valuemax={Math.round(maxDrawerHeight())}
+          title="Drag, or use arrow keys, to resize"
+          onPointerDown={startDrawerResize}
+          onPointerMove={resizeDrawer}
+          onPointerUp={stopDrawerResize}
+          onPointerCancel={stopDrawerResize}
+          onKeyDown={handleResizeKeyDown}
+        />
+        <div className="logs-drawer-header">
+          <span>Run logs</span>
+          <div className="logs-drawer-actions">
+            <button type="button" className="log-copy-button" onClick={copyLogs}>Copy logs</button>
+            <button
+              type="button"
+              className="log-clear-button"
+              disabled={!logs.length}
+              aria-live="polite"
+              title={clearPromptVisible ? confirmHint('Clear logs') : 'Clear run logs'}
+              onClick={clearLogEntries}
+            >
+              {clearPromptVisible ? confirmActionLabel('Clear logs') : 'Clear logs'}
+            </button>
+          </div>
+        </div>
+      <pre ref={logViewRef} onScroll={trackLogScroll}>
+        {formattedLogs.length ? formattedLogs.join('\n') : 'No log entries.'}
+      </pre>
+    </div>
+  );
+});
+
+function formatLogEntry(entry: LogEntry) {
+  const level = entry.level === 'error' ? 'ERR' : entry.level === 'warn' ? 'WARN' : 'INFO';
+  return `${new Date(entry.time).toLocaleTimeString([], { hour12: false })} ${level.padEnd(4, ' ')} ${escapeControlCharacters(entry.message)}`;
+}
+
+export default App;
