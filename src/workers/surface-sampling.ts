@@ -14,6 +14,7 @@ import { cross, length, normalize, sub } from '../geometry/vec3';
 export type ShapeSampleParams = {
   radius?: number;
   halfSize?: number;
+  halfHeight?: number;
   cylRadius?: number;
   cylHalfHeight?: number;
   torusMajor?: number;
@@ -159,16 +160,17 @@ export function sampleSurfacePointForShape(
   }
   if (shape === 'cube') {
     const halfSize = params.halfSize ?? SAMPLE_SHAPE_DIMENSIONS.cube.halfSize;
+    const halfHeight = params.halfHeight ?? halfSize;
     const face = Math.floor(random() * 6);
     const u = (random() * 2 - 1) * halfSize;
-    const v = (random() * 2 - 1) * halfSize;
+    const v = (random() * 2 - 1) * halfHeight;
     switch (face) {
       case 0: return { pos: [halfSize, u, v], normal: [1, 0, 0] };
       case 1: return { pos: [-halfSize, u, v], normal: [-1, 0, 0] };
       case 2: return { pos: [u, halfSize, v], normal: [0, 1, 0] };
       case 3: return { pos: [u, -halfSize, v], normal: [0, -1, 0] };
-      case 4: return { pos: [u, v, halfSize], normal: [0, 0, 1] };
-      default: return { pos: [u, v, -halfSize], normal: [0, 0, -1] };
+      case 4: return { pos: [u, u, halfHeight], normal: [0, 0, 1] };
+      default: return { pos: [u, u, -halfHeight], normal: [0, 0, -1] };
     }
   }
   if (shape === 'cylinder') {
