@@ -72,18 +72,36 @@ export function capsuleSdf(radius: number, halfHeight: number): ObjectSdf {
   };
 }
 
-export function sampleShapeObjectSdf(shape: SampleShape, sphereRadius: number): ObjectSdf {
+export interface SampleShapeDimensions {
+  sphereDiameter: number;
+  cubeWidth: number;
+  cubeHeight: number;
+  cylinderDiameter: number;
+  cylinderHeight: number;
+  torusInnerDiameter: number;
+  torusOuterDiameter: number;
+}
+
+export const DEFAULT_SAMPLE_SHAPE_DIMENSIONS: SampleShapeDimensions = {
+  sphereDiameter: 50, cubeWidth: 30, cubeHeight: 30,
+  cylinderDiameter: 30, cylinderHeight: 40,
+  torusInnerDiameter: 24, torusOuterDiameter: 56,
+};
+
+export function sampleShapeObjectSdf(shape: SampleShape, sphereRadius: number, dimensions: SampleShapeDimensions = DEFAULT_SAMPLE_SHAPE_DIMENSIONS): ObjectSdf {
   switch (shape) {
     case 'sphere':
-      return sphereSdf(sampleSphereRadius(sphereRadius));
+      return sphereSdf(dimensions.sphereDiameter / 2);
     case 'cube':
-      return cubeSdf(SAMPLE_SHAPE_DIMENSIONS.cube.halfSize);
+      return cubeSdf(dimensions.cubeWidth / 2);
     case 'cylinder': {
-      const { radius, halfHeight } = SAMPLE_SHAPE_DIMENSIONS.cylinder;
+      const radius = dimensions.cylinderDiameter / 2;
+      const halfHeight = dimensions.cylinderHeight / 2;
       return cylinderSdf(radius, halfHeight);
     }
     case 'torus': {
-      const { majorRadius, tubeRadius } = SAMPLE_SHAPE_DIMENSIONS.torus;
+      const majorRadius = (dimensions.torusOuterDiameter + dimensions.torusInnerDiameter) / 4;
+      const tubeRadius = (dimensions.torusOuterDiameter - dimensions.torusInnerDiameter) / 4;
       return torusSdf(majorRadius, tubeRadius);
     }
     case 'capsule': {
@@ -98,26 +116,26 @@ export function sampleShapeBounds(
   shape: SampleShape,
   sphereRadius: number,
   pad: number,
+  dimensions: SampleShapeDimensions = DEFAULT_SAMPLE_SHAPE_DIMENSIONS,
 ): { min: Vec3; max: Vec3 } {
   switch (shape) {
     case 'sphere': {
-      const r = sampleSphereRadius(sphereRadius) + pad;
+      const r = dimensions.sphereDiameter / 2 + pad;
       return { min: [-r, -r, -r], max: [r, r, r] };
     }
     case 'cube': {
-      const h = SAMPLE_SHAPE_DIMENSIONS.cube.halfSize + pad;
-      return { min: [-h, -h, -h], max: [h, h, h] };
+      const x = dimensions.cubeWidth / 2 + pad;
+      const z = dimensions.cubeHeight / 2 + pad;
+      return { min: [-x, -x, -z], max: [x, x, z] };
     }
     case 'cylinder': {
-      const { radius, halfHeight } = SAMPLE_SHAPE_DIMENSIONS.cylinder;
-      const xy = radius + pad;
-      const z = halfHeight + pad;
+      const xy = dimensions.cylinderDiameter / 2 + pad;
+      const z = dimensions.cylinderHeight / 2 + pad;
       return { min: [-xy, -xy, -z], max: [xy, xy, z] };
     }
     case 'torus': {
-      const { majorRadius, tubeRadius } = SAMPLE_SHAPE_DIMENSIONS.torus;
-      const xy = majorRadius + tubeRadius + pad;
-      const z = tubeRadius + pad;
+      const xy = dimensions.torusOuterDiameter / 2 + pad;
+      const z = (dimensions.torusOuterDiameter - dimensions.torusInnerDiameter) / 4 + pad;
       return { min: [-xy, -xy, -z], max: [xy, xy, z] };
     }
     case 'capsule': {
