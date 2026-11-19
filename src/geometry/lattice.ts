@@ -1547,17 +1547,26 @@ export function buildSampleShapeLattice(
   params: LatticeParams,
   generationSeed = DEFAULT_GENERATION_SEED,
 ): SdfFunction {
+  const dimensions = {
+    sphereDiameter: params.sampleSphereDiameter,
+    cubeWidth: params.sampleCubeWidth,
+    cubeHeight: params.sampleCubeHeight,
+    cylinderDiameter: params.sampleCylinderDiameter,
+    cylinderHeight: params.sampleCylinderHeight,
+    torusInnerDiameter: params.sampleTorusInnerDiameter,
+    torusOuterDiameter: params.sampleTorusOuterDiameter,
+  };
   switch (shape) {
     case 'sphere':
-      return buildSphereLattice(sampleSphereRadius(sphereRadius), params, generationSeed);
+      return buildSphereLattice(dimensions.sphereDiameter / 2, params, generationSeed);
     case 'cube':
-      return buildCubeLattice(SAMPLE_SHAPE_DIMENSIONS.cube.halfSize, params, generationSeed);
+      return buildCubeLattice(dimensions.cubeWidth / 2, params, generationSeed);
     case 'cylinder': {
-      const { radius, halfHeight } = SAMPLE_SHAPE_DIMENSIONS.cylinder;
-      return buildCylinderLattice(radius, halfHeight, params, generationSeed);
+      return buildCylinderLattice(dimensions.cylinderDiameter / 2, dimensions.cylinderHeight / 2, params, generationSeed);
     }
     case 'torus': {
-      const { majorRadius, tubeRadius } = SAMPLE_SHAPE_DIMENSIONS.torus;
+      const majorRadius = (dimensions.torusOuterDiameter + dimensions.torusInnerDiameter) / 4;
+      const tubeRadius = (dimensions.torusOuterDiameter - dimensions.torusInnerDiameter) / 4;
       return buildTorusLattice(majorRadius, tubeRadius, params, generationSeed);
     }
     case 'capsule': {
