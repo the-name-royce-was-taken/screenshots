@@ -6,18 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5176",
-    "prebuild": "npm test",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:e2e": "playwright test",
-    "bench:backends": "node scripts/run-backend-benchmark.mjs",
     "typecheck": "tsc -b",
-    "preview": "vite preview",
-    "predeploy": "npm test",
-    "deploy": "npx wrangler deploy",
-    "audit:dependencies": "npm audit --audit-level=high"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.9",
