@@ -88,20 +88,21 @@ export const DEFAULT_SAMPLE_SHAPE_DIMENSIONS: SampleShapeDimensions = {
   torusInnerDiameter: 24, torusOuterDiameter: 56,
 };
 
-export function sampleShapeObjectSdf(shape: SampleShape, sphereRadius: number, dimensions: SampleShapeDimensions = DEFAULT_SAMPLE_SHAPE_DIMENSIONS): ObjectSdf {
+export function sampleShapeObjectSdf(shape: SampleShape, sphereRadius: number, dimensions?: SampleShapeDimensions): ObjectSdf {
+  const dims = dimensions ?? DEFAULT_SAMPLE_SHAPE_DIMENSIONS;
   switch (shape) {
     case 'sphere':
-      return sphereSdf(dimensions.sphereDiameter / 2);
+      return sphereSdf(dimensions ? dims.sphereDiameter / 2 : sampleSphereRadius(sphereRadius));
     case 'cube':
-      return cubeSdf(dimensions.cubeWidth / 2);
+      return cubeSdf(dims.cubeWidth / 2, dims.cubeHeight / 2);
     case 'cylinder': {
-      const radius = dimensions.cylinderDiameter / 2;
-      const halfHeight = dimensions.cylinderHeight / 2;
+      const radius = dims.cylinderDiameter / 2;
+      const halfHeight = dims.cylinderHeight / 2;
       return cylinderSdf(radius, halfHeight);
     }
     case 'torus': {
-      const majorRadius = (dimensions.torusOuterDiameter + dimensions.torusInnerDiameter) / 4;
-      const tubeRadius = (dimensions.torusOuterDiameter - dimensions.torusInnerDiameter) / 4;
+      const majorRadius = (dims.torusOuterDiameter + dims.torusInnerDiameter) / 4;
+      const tubeRadius = (dims.torusOuterDiameter - dims.torusInnerDiameter) / 4;
       return torusSdf(majorRadius, tubeRadius);
     }
     case 'capsule': {
@@ -116,11 +117,11 @@ export function sampleShapeBounds(
   shape: SampleShape,
   sphereRadius: number,
   pad: number,
-  dimensions: SampleShapeDimensions = DEFAULT_SAMPLE_SHAPE_DIMENSIONS,
+  dimensions?: SampleShapeDimensions,
 ): { min: Vec3; max: Vec3 } {
   switch (shape) {
     case 'sphere': {
-      const r = dimensions.sphereDiameter / 2 + pad;
+      const r = (dimensions ? dimensions.sphereDiameter / 2 : sampleSphereRadius(sphereRadius)) + pad;
       return { min: [-r, -r, -r], max: [r, r, r] };
     }
     case 'cube': {
