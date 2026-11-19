@@ -1174,7 +1174,7 @@ function ViewerCameraSession() {
   })));
   const restoredSignatureRef = useRef<string>('');
   const applyingPersistedCameraRef = useRef(false);
-  const saveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!isValidViewerCameraState(viewerCameraState)) return;
