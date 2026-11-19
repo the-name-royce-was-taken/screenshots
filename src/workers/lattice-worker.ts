@@ -466,7 +466,7 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
         const pad = params.cellSize * 0.5;
 
         const requestedRadius = msg.sphereRadius ?? 0;
-        if (shape === 'sphere') sphereRadius = sampleSphereRadius(requestedRadius);
+        if (shape === 'sphere') sphereRadius = sampleSphereRadius(params.sampleSphereDiameter / 2);
         const shapeDimensions = {
           sphereDiameter: params.sampleSphereDiameter,
           cubeWidth: params.sampleCubeWidth,
@@ -486,11 +486,13 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
           const { cube, cylinder, torus, capsule } = SAMPLE_SHAPE_DIMENSIONS;
           const areaEstimate = (() => {
             switch (shape) {
-              case 'sphere': return 4 * Math.PI * (sphereRadius ?? DEFAULT_SAMPLE_SPHERE_RADIUS) ** 2;
-              case 'cube': return 6 * (cube.halfSize ** 2) * 4;
-              case 'cylinder': return 2 * Math.PI * cylinder.radius * (2 * cylinder.halfHeight)
-                + 2 * Math.PI * cylinder.radius * cylinder.radius;
-              case 'torus': return 4 * Math.PI * Math.PI * torus.majorRadius * torus.tubeRadius;
+              case 'sphere': return 4 * Math.PI * (params.sampleSphereDiameter / 2) ** 2;
+              case 'cube': return 2 * params.sampleCubeWidth ** 2 + 4 * params.sampleCubeWidth * params.sampleCubeHeight;
+              case 'cylinder': return Math.PI * params.sampleCylinderDiameter * params.sampleCylinderHeight
+                + Math.PI * (params.sampleCylinderDiameter / 2) ** 2 * 2;
+              case 'torus': return 4 * Math.PI * Math.PI
+                * ((params.sampleTorusOuterDiameter + params.sampleTorusInnerDiameter) / 4)
+                * ((params.sampleTorusOuterDiameter - params.sampleTorusInnerDiameter) / 4);
               case 'capsule': return 2 * Math.PI * capsule.radius * (2 * capsule.halfHeight)
                 + 4 * Math.PI * capsule.radius * capsule.radius;
               default: return 1000;
@@ -498,15 +500,16 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
           })();
           const sampleCount = surfaceSampleTargetCount(areaEstimate, params.cellSize);
           if (shape === 'sphere') {
-            surfaceSamples = buildFibonacciSphereSamples(sphereRadius ?? DEFAULT_SAMPLE_SPHERE_RADIUS, sampleCount);
+            surfaceSamples = buildFibonacciSphereSamples(params.sampleSphereDiameter / 2, sampleCount);
           } else {
             const samplerParams = {
-              radius: sphereRadius ?? DEFAULT_SAMPLE_SPHERE_RADIUS,
-              halfSize: cube.halfSize,
-              cylRadius: cylinder.radius,
-              cylHalfHeight: cylinder.halfHeight,
-              torusMajor: torus.majorRadius,
-              torusTube: torus.tubeRadius,
+              radius: params.sampleSphereDiameter / 2,
+              halfSize: params.sampleCubeWidth / 2,
+              halfHeight: params.sampleCubeHeight / 2,
+              cylRadius: params.sampleCylinderDiameter / 2,
+              cylHalfHeight: params.sampleCylinderHeight / 2,
+              torusMajor: (params.sampleTorusOuterDiameter + params.sampleTorusInnerDiameter) / 4,
+              torusTube: (params.sampleTorusOuterDiameter - params.sampleTorusInnerDiameter) / 4,
               capRadius: capsule.radius,
               capHalfHeight: capsule.halfHeight,
             };
