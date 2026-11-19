@@ -119,24 +119,25 @@ export function sampleShapeBounds(
   pad: number,
   dimensions?: SampleShapeDimensions,
 ): { min: Vec3; max: Vec3 } {
+  const dims = dimensions ?? DEFAULT_SAMPLE_SHAPE_DIMENSIONS;
   switch (shape) {
     case 'sphere': {
-      const r = (dimensions ? dimensions.sphereDiameter / 2 : sampleSphereRadius(sphereRadius)) + pad;
+      const r = (dimensions ? dims.sphereDiameter / 2 : sampleSphereRadius(sphereRadius)) + pad;
       return { min: [-r, -r, -r], max: [r, r, r] };
     }
     case 'cube': {
-      const x = dimensions.cubeWidth / 2 + pad;
-      const z = dimensions.cubeHeight / 2 + pad;
+      const x = dims.cubeWidth / 2 + pad;
+      const z = dims.cubeHeight / 2 + pad;
       return { min: [-x, -x, -z], max: [x, x, z] };
     }
     case 'cylinder': {
-      const xy = dimensions.cylinderDiameter / 2 + pad;
-      const z = dimensions.cylinderHeight / 2 + pad;
+      const xy = dims.cylinderDiameter / 2 + pad;
+      const z = dims.cylinderHeight / 2 + pad;
       return { min: [-xy, -xy, -z], max: [xy, xy, z] };
     }
     case 'torus': {
-      const xy = dimensions.torusOuterDiameter / 2 + pad;
-      const z = (dimensions.torusOuterDiameter - dimensions.torusInnerDiameter) / 4 + pad;
+      const xy = dims.torusOuterDiameter / 2 + pad;
+      const z = (dimensions.torusOuterDiameter - dims.torusInnerDiameter) / 4 + pad;
       return { min: [-xy, -xy, -z], max: [xy, xy, z] };
     }
     case 'capsule': {
