@@ -1,6 +1,6 @@
 // Human-facing facts about the loaded model: size, volume, cells across, and
 // the brush radius that suits it. Pure so the panel copy can be unit-tested.
-import type { BoundingBox, MeshInfo, SampleShape } from '../types/project';
+import type { BoundingBox, LatticeParams, MeshInfo, SampleShape } from '../types/project';
 
 export interface ModelExtents {
   /** Size along X, Y, Z in mm. */
@@ -24,9 +24,23 @@ export function modelExtents(
   meshInfo: MeshInfo | null,
   sampleShape: SampleShape | null,
   sphereRadius: number,
+  params?: LatticeParams,
 ): ModelExtents | null {
   if (meshInfo) return { size: boundingBoxSize(meshInfo.boundingBox), volumeMm3: meshInfo.volumeMm3 };
-  if (sampleShape) return SAMPLE_EXTENTS[sampleShape](sphereRadius || 25);
+  if (sampleShape) {
+    const p = params;
+    if (!p) return SAMPLE_EXTENTS[sampleShape](sphereRadius || 25);
+    const w = p.sampleCubeWidth, h = p.sampleCubeHeight;
+    const d = p.sampleCylinderDiameter, ch = p.sampleCylinderHeight;
+    const inner = p.sampleTorusInnerDiameter, outer = p.sampleTorusOuterDiameter;
+    const size: [number, number, number] = sampleShape === 'sphere'
+      ? [p.sampleSphereDiameter, p.sampleSphereDiameter, p.sampleSphereDiameter]
+      : sampleShape === 'cube' ? [w, w, h]
+      : sampleShape === 'cylinder' ? [d, d, ch]
+      : sampleShape === 'torus' ? [outer, outer, (outer - inner) / 2]
+      : [24, 24, 54];
+    return { size, volumeMm3: null };
+  }
   return null;
 }
 
