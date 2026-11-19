@@ -483,7 +483,7 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
           : buildSampleShapeLattice(shape, requestedRadius, fieldParams, generationSeed);
         postMessage({ type: 'progress', progress: 0.05, message: `${shape} SDF ready` } as WorkerResponse);
         if (isSurfacePolygon) {
-          const { cube, cylinder, torus, capsule } = SAMPLE_SHAPE_DIMENSIONS;
+          const { capsule } = SAMPLE_SHAPE_DIMENSIONS;
           const areaEstimate = (() => {
             switch (shape) {
               case 'sphere': return 4 * Math.PI * (params.sampleSphereDiameter / 2) ** 2;
