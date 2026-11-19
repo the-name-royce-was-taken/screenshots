@@ -39,7 +39,14 @@ export function modelExtents(
       : sampleShape === 'cylinder' ? [d, d, ch]
       : sampleShape === 'torus' ? [outer, outer, (outer - inner) / 2]
       : [24, 24, 54];
-    return { size, volumeMm3: null };
+    const volumeMm3 = sampleShape === 'sphere'
+      ? (4 / 3) * Math.PI * (p.sampleSphereDiameter / 2) ** 3
+      : sampleShape === 'cube' ? w * w * h
+      : sampleShape === 'cylinder' ? Math.PI * (d / 2) ** 2 * ch
+      : sampleShape === 'torus'
+        ? 2 * Math.PI ** 2 * ((outer + inner) / 4) * ((outer - inner) / 4) ** 2
+        : SAMPLE_EXTENTS.capsule(sphereRadius).volumeMm3;
+    return { size, volumeMm3 };
   }
   return null;
 }
